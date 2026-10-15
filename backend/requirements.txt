@@ -1,0 +1,40 @@
+# 电商风险控制系统（ERCS）后端依赖
+# 技术栈见 SPEC §0.3（已冻结）
+# 禁止引入：Kafka / Flink / Redis / Celery / Neo4j / 任何 ML 训练框架
+
+# ---------- Web 框架 ----------
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.32,<1.0
+python-multipart>=0.0.9
+
+# ---------- 数据校验与配置 ----------
+pydantic>=2.9,<3.0
+pydantic-settings>=2.6,<3.0
+
+# ---------- 数据库（MySQL 8） ----------
+sqlalchemy>=2.0,<3.0
+pymysql>=1.1,<2.0
+cryptography>=43.0            # PyMySQL 的 sha256_password / caching_sha2_password 需要
+
+# ---------- 认证 ----------
+python-jose[cryptography]>=3.3,<4.0
+passlib[bcrypt]>=1.7.4,<2.0
+# passlib 1.7.4 会读取 bcrypt.__about__，该属性在 bcrypt 4.1 被移除 —— 固定 4.0.1 避免告警
+bcrypt==4.0.1
+
+# ---------- AI Agent（LangGraph ReAct + Qwen） ----------
+langchain>=0.3.13,<0.4
+langchain-openai>=0.2.14,<0.4
+langchain-community>=0.3.13,<0.4
+langgraph>=0.2.60,<0.3
+
+# ---------- 工具 ----------
+ulid-py>=1.1.0
+faker>=30.0
+
+# ---------- 测试 ----------
+pytest>=8.3
+httpx>=0.28
+# `scripts/smoke_frontend.py` 通过 CDP 驱动 Edge 做前端冒烟自检时需要。
+# 它也随 uvicorn[standard] 一起安装，但脚本直接 import，属直接依赖，需显式声明。
+websockets>=13.0
