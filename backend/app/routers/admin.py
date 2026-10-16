@@ -12,6 +12,7 @@ from ..config import settings
 from ..database import get_db
 from ..deps import ADMIN_ONLY, ok
 from ..engine.step2_feature import reset_windows
+from ..utils import reset_case_no_cache
 from ..engine.step3_rule import clear_rule_cache
 from ..models import (RiskAgentMessage, RiskAgentSession, RiskAssessment,
                       RiskAuditLog, RiskBlacklist, RiskCase,
@@ -87,6 +88,7 @@ def reset_data(keep_config: bool = True, user: RiskUser = Depends(ADMIN_ONLY),
     reset_windows()
     clear_rule_cache()
     metrics.reset()          # 接口计数器归零，与数据一起回到干净基线
+    reset_case_no_cache()    # 案件短号重新从 1 开始（数据已清空）
 
     write_audit(db, "system_config", "reset", "delete", user.username, role=user.role,
                 detail={"keep_config": keep_config, "removed": removed})

@@ -10,6 +10,7 @@ import * as echarts from 'echarts'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { dashboardApi } from '@/api'
+import EventSnapshotPanel from '@/components/EventSnapshotPanel.vue'
 import RiskTag from '@/components/RiskTag.vue'
 import StateBlock from '@/components/StateBlock.vue'
 
@@ -20,6 +21,19 @@ const riskDist = ref({ items: [], total: 0 })
 const topRules = ref([])
 const events = ref([])
 const loss = ref({ items: [], total: 0, discount: 0 })
+
+/**
+ * 展开查看事件快照的行（值为 event_id，空串表示都收起）。
+ *
+ * ⚠ 原型图 02-dashboard 把滚屏写死为「时间 / 用户 / 事件类型 / 决策结果」**四列**，
+ *   所以这里**不动列**，改用「点一下多出一行」的加法来露出事件报文
+ *   （金额 / 来源单号 / 设备 / IP / `event_data` 快照）。
+ */
+const expandedEvent = ref('')
+
+function toggleEvent(eventId) {
+  expandedEvent.value = expandedEvent.value === eventId ? '' : eventId
+}
 
 const trendEl = ref(null)
 const donutEl = ref(null)
@@ -56,7 +70,13 @@ function money(v) {
 function num(v) {
   return Number(v || 0).toLocaleString('zh-CN')
 }
-/** HH:mm:ss */
+/**
+ * HH:mm:ss
+ *
+ * ⚠ 调用时传的必须是后端返回的 `create_time`。早期滚屏读的是 `created_at`
+ *   （后端从不返回该键），`!iso` 分支兜底成 `-` 且不抛错 —— 于是「实时事件滚屏」
+ *   的时间列**整列显示 `-`**，而冒烟脚本只收 JS 异常，什么都没抓到。
+ */
 function fmtTime(iso) {
   if (!iso) return '-'
   const d = new Date(iso)
@@ -113,10 +133,14 @@ function renderTrend(points) {
   const rates = points.map((p) => +((Number(p.reject_rate) || 0) * 100).toFixed(2))
   const counts = points.map((p) => p.assess_cnt ?? p.event_cnt ?? 0)
   setChart(trendEl.value, {
-    grid: { left: 48, right: 54, top: 34, bottom: 30 },
+    // ⚠ 图例位置不能再用 `right: 6, top: 2`（v3.1 修）：
+    //   ECharts 的值轴默认把 `name` 画在轴顶端（右上角），而图例也放右上时，
+    //   「事件量」三个字会被图例的色块与文字**压在一起**（截图可见）。
+    //   放顶部居中 + 给 grid.top 留出高度，两者各占一处，互不遮挡。
+    grid: { left: 48, right: 54, top: 46, bottom: 30 },
     tooltip: { trigger: 'axis' },
     legend: {
-      data: ['拦截率', '事件量'], right: 6, top: 2, itemWidth: 12, itemHeight: 8,
+      data: ['拦截率', '事件量'], left: 'center', top: 4, itemWidth: 12, itemHeight: 8,
       textStyle: { fontSize: 11, color: '#595959' },
     },
     xAxis: {
@@ -314,11 +338,9 @@ onBeforeUnmount(() => {
       <div class="card" style="margin-bottom:0">
         <div class="card-hd">
           <span>拦截率与事件量趋势</span>
-          <span class="legend">
-            <span><i style="background:#cf1322" />拦截率</span>
-            <span><i style="background:#b7d4ff" />事件量</span>
-            <span class="muted">近 {{ TREND_DAYS }} 天 · 每 5s 刷新</span>
-          </span>
+          <!-- 图表自身的 legend 已经能点击隐藏系列，这里不再重复画一套色块图例。
+               两套图例并排会让卡片头看起来很挤，而且颜色对不上时更让人困惑。 -->
+          <span class="muted">近 {{ TREND_DAYS }} 天 · 每 5s 刷新</span>
         </div>
         <div class="card-bd"><div ref="trendEl" class="chart-box" style="height:236px" /></div>
       </div>
@@ -357,18 +379,28 @@ onBeforeUnmount(() => {
         <div class="card-hd">
           <span>实时事件滚屏</span>
           <span class="row" style="gap:6px">
+            <span class="muted">点击行查看事件快照</span>
             <span style="width:7px;height:7px;border-radius:50%;background:var(--success);display:inline-block" />
             <span class="muted">5s 轮询</span>
           </span>
         </div>
         <div class="card-bd tight">
-          <div class="ticker">
-            <div v-for="e in events" :key="e.event_id" class="ticker-row">
-              <span class="t">{{ fmtTime(e.created_at) }}</span>
-              <span class="u">{{ e.user_id }}</span>
-              <span class="e">{{ e.event_type }}</span>
-              <RiskTag kind="decision" :value="e.decision" />
-            </div>
+          <div class="ticker" :class="{ open: !!expandedEvent }">
+            <template v-for="e in events" :key="e.event_id">
+              <div
+                class="ticker-row clickable"
+                :class="{ sel: expandedEvent === e.event_id }"
+                @click="toggleEvent(e.event_id)"
+              >
+                <span class="t">{{ fmtTime(e.create_time) }}</span>
+                <span class="u">{{ e.user_id }}</span>
+                <span class="e">{{ e.event_type }}</span>
+                <RiskTag kind="decision" :value="e.decision" />
+              </div>
+              <div v-if="expandedEvent === e.event_id" class="ticker-snap">
+                <EventSnapshotPanel :event-id="e.event_id" />
+              </div>
+            </template>
             <div v-if="!events.length" class="muted" style="padding:16px 0;text-align:center">暂无事件</div>
           </div>
         </div>
@@ -395,3 +427,20 @@ onBeforeUnmount(() => {
     </div>
   </StateBlock>
 </template>
+
+<style scoped>
+/*
+ * ⚠ `.ticker` 在 main.css 里是 `max-height:236px; overflow:hidden` ——
+ *   滚屏只需要「一排一排往下走」，不需要滚动条。但展开事件快照后，
+ *   那点高度会把面板切掉一半。所以只在**有行展开时**放开高度并允许滚动。
+ */
+.ticker.open { max-height: 420px; overflow-y: auto; }
+.ticker-row.clickable { cursor: pointer; }
+.ticker-row.clickable:hover { background: #fafbfd; }
+.ticker-row.sel { background: #f5f8ff; }
+.ticker-snap {
+  padding: 12px 14px 14px;
+  border-bottom: 1px solid var(--border2);
+  background: #fbfcfe;
+}
+</style>

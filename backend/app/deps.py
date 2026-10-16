@@ -98,6 +98,10 @@ ADMIN_ONLY = require_role("admin")
 # 健康度：admin / ops
 SYSTEM_ROLES = require_role("admin", "ops")
 
+# 分析师专属能力（导出分析报告 / 保存视图）：analyst 为主，策略师与管理员也需要
+# （策略师要交规则效果报告、管理员要全量数据），审核员与运维不涉及数据交付。
+ANALYST_ROLES = require_role("analyst", "strategist", "admin")
+
 # AI Agent：strategist / analyst / admin
 AGENT_ROLES = require_role("strategist", "analyst", "admin")
 

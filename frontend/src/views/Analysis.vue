@@ -11,7 +11,7 @@
 import * as echarts from 'echarts'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 
-import { dashboardApi } from '@/api'
+import { dashboardApi, fetchAnalysisCsv } from '@/api'
 import RiskTag from '@/components/RiskTag.vue'
 import StateBlock from '@/components/StateBlock.vue'
 
@@ -109,10 +109,13 @@ function renderTrend(list) {
   const assess = list.map((p) => p.assess_cnt ?? p.event_cnt ?? 0)
   const high = list.map((p) => p.high_risk_cnt ?? 0)
   setChart(trendEl.value, {
-    grid: { left: 52, right: 56, top: 34, bottom: 30 },
+    // ⚠ 图例改「顶部居中」+ 抬高 grid.top（v3.1 修）：
+    //   原来是 `right: 6, top: 2`，而右侧值轴的 `name: '高风险数'` 默认画在轴顶端，
+    //   于是「高风险数」被图例压在下面 —— 截图里那一处文字重叠就是它。
+    grid: { left: 52, right: 56, top: 46, bottom: 30 },
     tooltip: { trigger: 'axis' },
     legend: {
-      data: ['评估量', '高风险数'], right: 6, top: 2, itemWidth: 12, itemHeight: 8,
+      data: ['评估量', '高风险数'], left: 'center', top: 4, itemWidth: 12, itemHeight: 8,
       textStyle: { fontSize: 11, color: '#595959' },
     },
     xAxis: {
@@ -152,12 +155,12 @@ function renderDecisionStack(list) {
     data: ordered.map((r) => (r.d.total ? +(r.d[k] / r.d.total * 100).toFixed(1) : 0)),
   }))
   setChart(decisionEl.value, {
-    grid: { left: 72, right: 76, top: 12, bottom: 28 },
+    // ⚠ 本图**不放图内 legend**（v3.1 修）：
+    //   横向堆叠柱的五段颜色由卡片头的 HTML 图例说明即可，
+    //   卡片头 + 图内各画一套会让同一张卡片出现两行完全相同的图例（截图可见），
+    //   而且图内那套还会顶到 y 轴第一行日期上。
+    grid: { left: 72, right: 76, top: 10, bottom: 28 },
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, valueFormatter: (v) => `${v}%` },
-    legend: {
-      data: DECISION_ORDER, top: 0, right: 0, itemWidth: 10, itemHeight: 8,
-      textStyle: { fontSize: 11, color: '#595959' },
-    },
     xAxis: { type: 'value', max: 100, axisLabel: { color: '#8c8c8c', fontSize: 11, formatter: '{value}%' }, splitLine: { lineStyle: { color: '#f0f2f5' } } },
     yAxis: {
       type: 'category', data: ordered.map((r) => r.date),
@@ -203,10 +206,12 @@ function renderLevelTrend(list) {
         }),
   }))
   setChart(levelEl.value, {
-    grid: { left: 46, right: 20, top: 16, bottom: 30 },
+    // 四条折线必须靠图例区分，所以**保留图内 legend**，只是放正、让出高度
+    grid: { left: 46, right: 20, top: 34, bottom: 30 },
     tooltip: { trigger: 'axis', valueFormatter: (v) => `${v}%` },
     legend: {
-      data: LEVEL_ORDER.map((k) => LEVEL_NAMES[k]), top: 0, right: 0, itemWidth: 10, itemHeight: 8,
+      data: LEVEL_ORDER.map((k) => LEVEL_NAMES[k]), left: 'center', top: 2,
+      itemWidth: 10, itemHeight: 8,
       textStyle: { fontSize: 11, color: '#595959' },
     },
     xAxis: {
@@ -225,7 +230,17 @@ const zeroHitCount = computed(() => ruleItems.value.filter((r) => Number(r.hit_c
 function ruleCode(r) { return r.rule_code || r.rule_id || '-' }
 function ruleCategory(r) { return r.category || r.rule_category || '-' }
 function ruleLevel(r) { return normalizeLevel(r.level || r.risk_level || '') }
+/**
+ * 规则是否启用。
+ *
+ * ⚠ 后端 `rule_effectiveness` 返回的键是 `is_enabled`（0/1），
+ *   早期这里只读 `enabled` / `status` —— 两个键后端都不返回，
+ *   于是三次判断全部落空、恒 `return true`，**「状态」列对每条规则都显示「启用」**，
+ *   连 `is_enabled=0` 的停用规则也显示成启用（筛选/判定列永远不对，且不报错）。
+ *   `is_enabled` 必须排在第一位；后两个键保留只为兼容别处的返回形态。
+ */
 function ruleEnabled(r) {
+  if (r.is_enabled != null) return Number(r.is_enabled) !== 0
   if (r.enabled != null) return Boolean(r.enabled)
   if (r.status != null) return !['disabled', '停用', 'inactive'].includes(r.status)
   return true
@@ -281,20 +296,39 @@ async function load() {
   }
 }
 
-function exportCsv() {
-  const header = ['规则编码', '规则名称', '分类', '等级', '命中次数', '命中率', '状态', '判定']
-  const lines = ruleItems.value.map((r) => [
-    ruleCode(r), r.rule_name || '', ruleCategory(r), ruleLevel(r),
-    r.hit_count ?? 0, pct(r.hit_rate), ruleEnabled(r) ? '启用' : '停用', ruleEffect(r),
-  ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
-  const csv = `﻿${header.join(',')}\n${lines.join('\n')}`
-  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `ercs-rule-effectiveness-${new Date().toISOString().slice(0, 10)}.csv`
-  a.click()
-  URL.revokeObjectURL(url)
+/**
+ * 分析师专属：导出**分析报告**（后端合成 CSV，带 UTF-8 BOM）。
+ *
+ * ⚠ 为什么走接口而不是前端拼 CSV：
+ *   前端自己拼的 CSV 没有 BOM，Excel 打开中文全是乱码（PRD §10.2 约定必须是
+ *   带 BOM 的 UTF-8）。报告还包含「每日趋势 + 规则效果」两块，
+ *   让后端一次生成，口径与页面上看到的完全一致。
+ */
+const exporting = ref(false)
+const toast = ref('')
+
+async function exportReport() {
+  exporting.value = true
+  try {
+    // ⚠ `fetchAnalysisCsv` 用 `responseType: 'blob'`，响应拦截器对 Blob 走
+    //   「非标准包装直接返回」分支（api/index.js:61），**返回值本身就是 Blob**。
+    //   早期写成 `new Blob([resp.data])`，而 Blob 上没有 `.data` →
+    //   包出来的是字符串 `undefined`，导出的 CSV 打开只有一行 "undefined"。
+    const resp = await fetchAnalysisCsv(rangeDays.value, eventType.value || '')
+    const url = URL.createObjectURL(new Blob([resp], { type: 'text/csv;charset=utf-8' }))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `ercs-analysis-${rangeDays.value}d.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.value = '已导出分析报告（近 ' + rangeDays.value + ' 天，UTF-8 BOM）'
+  } catch (err) {
+    toast.value = `导出失败：${err.message}`
+  } finally {
+    exporting.value = false
+  }
 }
+
 
 function resize() {
   charts.forEach((c) => c && !c.isDisposed() && c.resize())
@@ -314,6 +348,8 @@ onBeforeUnmount(() => {
 
 <template>
   <div>
+    <div v-if="toast" class="alert alert-info mb-16"><div>{{ toast }}</div></div>
+
     <!-- 筛选区 -->
     <div class="card">
       <div class="card-bd tight" style="padding-top:14px;padding-bottom:14px">
@@ -333,7 +369,9 @@ onBeforeUnmount(() => {
           <div style="flex:1" />
           <div class="row-gap-8" style="margin-bottom:1px">
             <button class="btn btn-primary" @click="load">刷新</button>
-            <button class="btn" @click="exportCsv">导出 CSV</button>
+            <button class="btn" @click="exportReport" :disabled="exporting">
+              {{ exporting ? '导出中…' : '导出报告' }}
+            </button>
           </div>
         </div>
       </div>
@@ -344,11 +382,9 @@ onBeforeUnmount(() => {
       <div class="card">
         <div class="card-hd">
           <span>评估量与高风险数趋势</span>
-          <span class="legend">
-            <span><i style="background:#1677ff" />评估量（左轴）</span>
-            <span><i style="background:#cf1322" />高风险数（右轴）</span>
-            <span class="muted">近 {{ rangeDays }} 天</span>
-          </span>
+          <!-- 图内 legend 已经标注两个系列（且可点击隐藏），这里只留范围说明，
+               避免同一张卡片出现两套内容相同的图例。 -->
+          <span class="muted">左轴 评估量 · 右轴 高风险数 · 近 {{ rangeDays }} 天</span>
         </div>
         <div class="card-bd"><div ref="trendEl" class="chart-box" style="height:232px" /></div>
       </div>

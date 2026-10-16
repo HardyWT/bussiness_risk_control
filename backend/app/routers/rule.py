@@ -4,7 +4,7 @@
 权限（SPEC R-AU-11 / PRD §2.1.1）：
   - 读（rules / features / blacklist GET）：reviewer / strategist / analyst / admin（**ops 不可读**）
   - 写（rules / blacklist）：**仅 strategist** —— admin 对这两项为只读，
-    与 PRD §2.1.1 的 👁 标记一致（README §8.2 已记录曾误把 admin 放进写角色）
+    与 PRD §2.1.1 的 👁 标记一致（HANDOFF §九 · 8.2 已记录曾误把 admin 放进写角色）
   - 阈值改（/rules/scenes/**）：**仅 admin**
   - 挑战相关：回调 strategist / admin；查询 strategist / analyst / admin
 """

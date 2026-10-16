@@ -69,6 +69,24 @@ async function load() {
   loading.value = false
 }
 
+/* ---------------------------------------------------------------- 运行日志（T-81）
+ *
+ * 运维专属：后端把最近 500 条日志留在内存环形缓冲里，这里按级别筛选查看。
+ * 为什么不做在审计页：审计是**业务操作留痕**（谁改了什么），
+ * 运行日志是**系统排障**（服务在报什么错），用途与权限范围都不同。
+ */
+const logs = ref([])
+const logLevel = ref('')
+
+async function loadLogs() {
+  try {
+    const data = await systemApi.logs({ lines: 80, ...(logLevel.value ? { level: logLevel.value } : {}) })
+    logs.value = data.lines || []
+  } catch {
+    logs.value = []
+  }
+}
+
 onMounted(async () => {
   await load()
   timer = setInterval(load, 10000)
@@ -120,6 +138,31 @@ onBeforeUnmount(() => clearInterval(timer))
     <!-- ② 数据统计区 -->
     <div class="grid g-2-1">
       <div class="card" style="margin-bottom:0">
+        <div class="card-hd">
+          <span>运行日志（最近 {{ logs.length }} 条）</span>
+          <span class="row" style="gap:8px">
+            <select v-model="logLevel" style="width:130px" @change="loadLogs">
+              <option value="">全部级别</option>
+              <option value="INFO">INFO</option>
+              <option value="WARNING">WARNING</option>
+              <option value="ERROR">ERROR</option>
+            </select>
+            <button class="btn btn-sm" @click="loadLogs">刷新</button>
+          </span>
+        </div>
+        <div class="card-bd tight">
+          <div v-if="!logs.length" class="muted" style="padding:8px 0">
+            暂无日志（服务刚启动时缓冲区为空，运行一会儿再刷新）
+          </div>
+          <div v-else class="log-box">
+            <div v-for="(l, i) in logs" :key="i" class="log-line">
+              <span class="muted mono">{{ l.time }}</span>
+              <span class="log-lv" :class="'lv-' + l.level.toLowerCase()">{{ l.level }}</span>
+              <span class="mono">{{ l.message }}</span>
+            </div>
+          </div>
+        </div>
+
         <div class="card-hd"><span>数据统计</span><span class="muted">业务表 + 风控表</span></div>
         <div class="card-bd">
           <div class="stat-mini">

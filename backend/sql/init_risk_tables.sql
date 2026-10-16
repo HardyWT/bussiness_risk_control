@@ -42,9 +42,9 @@ CREATE TABLE risk_assessment (
 	create_time DATETIME NOT NULL, 
 	PRIMARY KEY (assessment_id)
 );
-CREATE INDEX idx_ast_decision ON risk_assessment (decision);
 CREATE INDEX idx_ast_user ON risk_assessment (user_id, create_time);
 CREATE INDEX idx_ast_time ON risk_assessment (create_time);
+CREATE INDEX idx_ast_decision ON risk_assessment (decision);
 
 CREATE TABLE risk_audit_log (
 	log_id VARCHAR(50) NOT NULL, 
@@ -80,6 +80,7 @@ CREATE INDEX idx_bl_lookup ON risk_blacklist (entity_type, entity_value, list_ty
 
 CREATE TABLE risk_case (
 	case_id VARCHAR(50) NOT NULL, 
+	case_no INTEGER, 
 	assessment_id VARCHAR(50) NOT NULL, 
 	event_id VARCHAR(50) NOT NULL, 
 	user_id VARCHAR(64) NOT NULL, 
@@ -99,6 +100,8 @@ CREATE INDEX idx_case_cat ON risk_case (case_category);
 CREATE INDEX idx_case_status ON risk_case (case_status, create_time);
 CREATE INDEX idx_case_ast ON risk_case (assessment_id);
 CREATE INDEX idx_case_event ON risk_case (event_id);
+CREATE INDEX idx_case_no ON risk_case (case_no);
+CREATE INDEX ix_risk_case_case_no ON risk_case (case_no);
 
 CREATE TABLE risk_challenge_record (
 	challenge_id VARCHAR(50) NOT NULL, 
@@ -148,8 +151,8 @@ CREATE TABLE risk_entity_relation (
 	create_time DATETIME NOT NULL, 
 	PRIMARY KEY (relation_id)
 );
-CREATE INDEX idx_rel_source ON risk_entity_relation (source_entity_id);
 CREATE INDEX idx_rel_target ON risk_entity_relation (target_entity_id);
+CREATE INDEX idx_rel_source ON risk_entity_relation (source_entity_id);
 
 CREATE TABLE risk_event (
 	event_id VARCHAR(50) NOT NULL, 
@@ -166,11 +169,11 @@ CREATE TABLE risk_event (
 	create_time DATETIME NOT NULL, 
 	PRIMARY KEY (event_id)
 );
+CREATE INDEX idx_ev_user ON risk_event (user_id, create_time);
+CREATE INDEX idx_ev_time ON risk_event (create_time);
 CREATE INDEX idx_ev_type ON risk_event (event_type, create_time);
 CREATE INDEX idx_ev_device ON risk_event (device_id, create_time);
 CREATE INDEX idx_ev_ip ON risk_event (ip, create_time);
-CREATE INDEX idx_ev_user ON risk_event (user_id, create_time);
-CREATE INDEX idx_ev_time ON risk_event (create_time);
 
 CREATE TABLE risk_feature (
 	feature_id BIGINT NOT NULL AUTO_INCREMENT, 
@@ -183,9 +186,9 @@ CREATE TABLE risk_feature (
 	PRIMARY KEY (feature_id), 
 	CONSTRAINT fk_feat_event FOREIGN KEY(event_id) REFERENCES risk_event (event_id)
 );
-CREATE INDEX idx_feat_baseline ON risk_feature (compute_time, feature_name);
 CREATE INDEX idx_feat_entity ON risk_feature (dimension, feature_name);
 CREATE INDEX idx_feat_event ON risk_feature (event_id);
+CREATE INDEX idx_feat_baseline ON risk_feature (compute_time, feature_name);
 
 CREATE TABLE risk_rule (
 	rule_id VARCHAR(50) NOT NULL, 

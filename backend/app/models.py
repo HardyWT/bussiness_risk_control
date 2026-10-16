@@ -411,6 +411,9 @@ class RiskCase(Base):
     __tablename__ = "risk_case"
 
     case_id: Mapped[str] = mapped_column(String(50), primary_key=True)       # cas + ULID
+    # 对外展示用的**可读短号**（`C-1024`）。主键与接口契约仍用 ULID ——
+    # 短号只是给人看的：演示时客户能记住、能口头报出来。
+    case_no: Mapped[int | None] = mapped_column(Integer, index=True)
     assessment_id: Mapped[str] = mapped_column(String(50), nullable=False)
     event_id: Mapped[str] = mapped_column(String(50), nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -432,6 +435,7 @@ class RiskCase(Base):
         # 二者此前均无索引，是案件详情页与 Challenge 回调的主要慢查询来源。
         Index("idx_case_ast", "assessment_id"),
         Index("idx_case_event", "event_id"),
+        Index("idx_case_no", "case_no"),
     )
 
 

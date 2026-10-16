@@ -157,6 +157,11 @@ def user_to_dict(user: RiskUser) -> dict:
     ⚠ `last_login_at` 为空时必须返回 `None`，**不能**用当前时间顶替 ——
     个人中心与登录页会把它显示成「上次登录」，从未登录过的账号会显示成
     「刚刚登录过」，属于凭空造数据。
+
+    ⚠ `fail_count` 必须带上：账号管理页有「失败次数」列（配合「连续失败 5 次锁定」的
+      说明文案，用来判断离锁定还差几次）。早期这里没返回该键，前端读恒得 `undefined`
+      而显示成 `-`，页面看起来正常但那一列永远是空的。
+      该键本来就不是敏感信息 —— `GET /auth/users/{id}/lock-state` 早已对外返回它。
     """
     return {
         "user_id": user.user_id,
@@ -164,5 +169,6 @@ def user_to_dict(user: RiskUser) -> dict:
         "display_name": user.display_name,
         "role": user.role,
         "status": user.status,
+        "fail_count": user.fail_count,
         "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
     }

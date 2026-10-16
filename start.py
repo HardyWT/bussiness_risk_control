@@ -40,6 +40,15 @@ def python_exe() -> Path:
     return VENV_PY if VENV_PY.exists() else VENV_PY_POSIX
 
 
+def port_in_use(port: int) -> bool:
+    """端口是否已被占用（已有服务在跑）。"""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.6)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
 def run(cmd, cwd=None) -> int:
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     return subprocess.call([str(c) for c in cmd], cwd=cwd, env=env)
@@ -154,6 +163,21 @@ def main() -> None:
 
     exe = ensure_python()
     if not check_env():
+        sys.exit(1)
+
+    # ⚠ 必须在**动数据库之前**拦住「后端已在运行」的情况（v3.1 踩过的坑）：
+    #   本脚本的 `prepare_data()` 会清空并重建风控数据（recreate / clean / replay）。
+    #   若已有后端正跑着（或另一个 `start.py` 实例在跑），它可能**同时也在回放** ——
+    #   两个回放都会先 `reset_risk_artifacts()` 清空再灌，于是互相清掉对方的行，
+    #   落库条数只剩一部分、时间轴也截断在中途，表现为「最近几天完全没有数据」。
+    #   数据重建是破坏性操作，绝不能在有服务正跑着的时候悄悄执行。
+    if port_in_use(args.port) and not args.skip_seed:
+        print(f"\n✗ 端口 {args.port} 已被占用 —— 后端似乎正在运行。")
+        print("  本脚本会**清空并重建**风控数据（init_db / gen_* / replay），")
+        print("  若有另一个回放同时在跑，两边会互相清掉对方的数据，落库条数会残缺。")
+        print("  请先停止已运行的服务（Ctrl+C，或结束占用该端口的进程），再重新执行：")
+        print("    Windows: netstat -ano | findstr :%d   然后 taskkill /F /PID <pid>" % args.port)
+        print("  若数据已经就绪、只想启动服务：python start.py --skip-seed")
         sys.exit(1)
 
     print("\n  环境预检")

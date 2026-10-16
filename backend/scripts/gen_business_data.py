@@ -28,7 +28,7 @@ from datetime import timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from sqlalchemy import delete  # noqa: E402
+from sqlalchemy import delete, text  # noqa: E402
 
 from app.database import create_all, session_scope  # noqa: E402
 from app.models import (Logistics, LogisticsCompany, LogisticsComplaint,  # noqa: E402
@@ -74,12 +74,28 @@ LOGISTICS_COMPLAINTS = ["配送延迟", "货物破损", "包裹丢失", "服务�
                         "未经允许代签", "虚假签收", "运费争议", "配送错误",
                         "多次投递失败", "其他投诉"]
 
-PROVINCES = [("浙江省", ["杭州市", "宁波市", "温州市"], ["西湖区", "余杭区", "鄞州区"]),
-             ("江苏省", ["南京市", "苏州市"], ["鼓楼区", "姑苏区"]),
-             ("上海市", ["上海市"], ["浦东新区", "徐汇区"]),
-             ("广东省", ["广州市", "深圳市"], ["天河区", "南山区"]),
-             ("北京市", ["北京市"], ["朝阳区", "海淀区"]),
-             ("四川省", ["成都市"], ["武侯区", "锦江区"])]
+# 行政区划参考数据（v3.1 扩充：6 → 14 个省级单位）
+#
+# ⚠ 为什么必须够多：`region` 是业务参考表，而 `addr_province_count`（F-A02）
+#   统计用户**不同省份数**，规则 R-013 要求 `>= 5`。
+#   只有 6 个省时，任何用户最多跨 6 省 —— 想造「跨省多地址」画像（例如代购/黄牛
+#   在不同省份收货）几乎没有余量，参考数据本身也显得单薄（去重后只有 23 行）。
+PROVINCES = [
+    ("浙江省", ["杭州市", "宁波市", "温州市", "嘉兴市"], ["西湖区", "余杭区", "鄞州区", "南湖区"]),
+    ("江苏省", ["南京市", "苏州市", "无锡市"], ["鼓楼区", "姑苏区", "滨湖区"]),
+    ("上海市", ["上海市"], ["浦东新区", "徐汇区", "静安区"]),
+    ("广东省", ["广州市", "深圳市", "东莞市"], ["天河区", "南山区", "松山湖"]),
+    ("北京市", ["北京市"], ["朝阳区", "海淀区", "丰台区"]),
+    ("四川省", ["成都市", "绵阳市"], ["武侯区", "锦江区", "涪城区"]),
+    ("湖北省", ["武汉市", "宜昌市"], ["洪山区", "武昌区", "西陵区"]),
+    ("陕西省", ["西安市", "咸阳市"], ["雁塔区", "碑林区", "秦都区"]),
+    ("山东省", ["青岛市", "济南市"], ["市南区", "历下区", "崂山区"]),
+    ("福建省", ["厦门市", "福州市"], ["思明区", "鼓楼区", "湖里区"]),
+    ("湖南省", ["长沙市", "株洲市"], ["岳麓区", "天心区", "天元区"]),
+    ("河南省", ["郑州市", "洛阳市"], ["金水区", "洛龙区", "二七区"]),
+    ("辽宁省", ["沈阳市", "大连市"], ["和平区", "中山区", "甘井子区"]),
+    ("重庆市", ["重庆市"], ["渝北区", "江北区", "南岸区"]),
+]
 
 SKU_NAMES = ["无线耳机", "机械键盘", "智能手表", "蓝牙音箱", "移动电源",
              "显示器", "扫地机器人", "游戏主机", "固态硬盘", "路由器",
@@ -485,6 +501,366 @@ def gen_postsale(db, detail_ids: list[str], ring_users: list[str],
     db.flush()
 
 
+RING_MIN_ORDERS = 8        # 团伙账号的最少订单数（压住 user_refund_rate，见函数说明）
+
+
+def gen_ring_postsales(db, ring_users: list[str], cheap_skus_ring: list) -> int:
+    """给地址团伙的 9 个账号各补 ≥4 条**退款**记录（覆盖 R-030）。
+
+    ⚠ 为什么必须补：
+      R-030「手机号团伙退款」= `phone_refund_rate_24h >= 0.9 AND user_refund_count >= 3`，
+      其中 `user_refund_count` 是**全量**统计（`postsale_type='退款'` 的条数）。
+      团伙账号在基线数据里平均只有 0~1 条退款单 → 前件永远不成立 →
+      这条**极高（一票否决 → Reject）**规则成了摆设，命中数恒为 0，
+      并且「售后团伙」这个场景在案件里只表现为 Review、永远到不了 Reject。
+
+      团伙本来就靠退款套利，历史上多次退款完全符合画像，不是为规则硬造数据。
+
+    返回补充的条数。
+    """
+    made = 0
+    for idx, uid in enumerate(ring_users):
+        rows = db.execute(text("""
+            SELECT od.order_detail_id, oi.order_id
+            FROM order_detail od JOIN order_info oi ON od.order_id = oi.order_id
+            WHERE oi.user_id = :uid ORDER BY oi.create_time DESC
+        """), {"uid": uid}).all()
+        if not rows:
+            continue
+
+        # ---- 先把订单补到 RING_MIN_ORDERS 单 ----
+        # ⚠ 订单数直接决定 `user_refund_rate = 退款数 / 订单数`，
+        #   而它决定 R-001「高退款率用户」是否命中。见下方「3 条退款单」处的完整说明。
+        order_ids = {oid for _, oid in rows}
+        seq = 5000 + idx * 20
+        while len(order_ids) < RING_MIN_ORDERS:
+            seq += 1
+            oid = f"O-RG{seq:05d}"
+            sku_id, _, price = random.choice(cheap_skus_ring)
+            cnt = random.randint(1, 2)
+            total = round(price * cnt, 2)
+            disc = round(total * random.uniform(0, 0.2), 2)
+            ct = ts(random.uniform(5, 80))
+            did = f"OD-RG{seq:05d}-1"
+            if db.get(OrderInfo, oid) is None:
+                db.add(OrderInfo(order_id=oid, create_time=ct,
+                                 payment_time=ct + timedelta(seconds=random.uniform(60, 3600)),
+                                 user_id=uid, receive_id=REFUND_RING_ADDRESS,
+                                 order_status=random.choice(["已支付", "已完成"])))
+                db.add(OrderDetail(order_detail_id=did, order_id=oid, sku_id=sku_id,
+                                   sku_name=f"商品-{sku_id}", sku_count=cnt,
+                                   total_amount=total, discount_amount=disc,
+                                   final_amount=round(total - disc, 2)))
+                rows.append((did, oid))
+            order_ids.add(oid)
+        db.flush()
+
+        # ---- 3 条退款单 ----
+        # ⚠ 条数与订单数的关系是刻意调过的（v3.1）：
+        #   R-001「高退款率用户」(>0.5) 与 R-006「地址团伙退款」**同为 70 分**，
+        #   而 `case_category` 取「最高分规则」的分类、同分时取先出现的
+        #   （按优先级序，R-001 的 100 > R-006 的 90）——
+        #   于是只要 R-001 命中，「地址风险」这个分类就永远被「售后滥用」盖掉
+        #   （实测：地址风险案件 40 → 2）。
+        #   把退款率压到 0.5 以下（3 退款 / ≥8 订单 = 0.375）后 R-001 不再命中，
+        #   R-006 成为最高分 → 案件正确归类到「地址风险」；
+        #   同时 `user_refund_count >= 3` 仍满足 R-030 的前件。
+        for k, (detail_id, _oid) in enumerate(rows[:3]):
+            ps_id = f"PS-RG{idx:02d}{k:02d}"
+            if db.get(Postsale, ps_id) is not None:
+                continue
+            db.add(Postsale(
+                postsale_id=ps_id, order_detail_id=detail_id,
+                refund_amount=round(random.uniform(800, 4000), 2),
+                postsale_type="退款", postsale_status=random.choice(["已退款", "退款中"]),
+                postsale_reason="未收到货", create_time=ts(random.uniform(2, 70)),
+            ))
+            made += 1
+    db.flush()
+    return made
+
+
+# ================================================================ 风险画像用户（v3.1）
+#
+# ⚠ 为什么需要这一批人：
+#
+#   `risk_rule` 里 30 条规则各自刻画**一种风险画像**，但业务库里原本只有
+#   「200 个正常用户 + 1 个地址团伙」，于是其中 15 条规则的条件在数据上**永远不成立** ——
+#   规则效果表上一半显示「零命中」，看起来像规则写错了，
+#   实际是**库里没有对应的样本**。这不是调参问题，是数据覆盖问题。
+#
+#   这里按规则集**反推**，为每一种画像造出能命中的样本用户。
+#   每个画像只有 5 个人、且行为极端集中，所以不会污染整体分布
+#   （正常用户的 `user_refund_rate` / `user_avg_order_amount` 仍然正常）。
+#
+#   覆盖关系（命中哪个画像就能让哪条规则"活"起来）：
+#
+#   | 画像 | 覆盖规则 | 规则条件 |
+#   |------|---------|---------|
+#   | 高频下单 | R-019 | `user_orders_7d >= 20` |
+#   | 高频售后 | R-020 / R-024 | `user_postsale_count >= 8` / `user_postsale_rate > 0.6` |
+#   | 频繁取消 | R-021 | `user_cancel_count >= 8` |
+#   | 高额退款 | R-023 | `user_refund_amount >= 20000` |
+#   | 多地址跨省 | R-012 / R-013 | `addr_total_count >= 10` / `addr_province_count >= 5` |
+#   | 批发扫货 | R-016 / R-017 / R-018 | `order_sku_count >= 50` / `order_item_count >= 20` / `order_category_count >= 8` |
+#   | 大额折扣 | R-015 | `order_discount_rate > 0.8` |
+#   | 秒付订单 | R-014 | `order_pay_interval_sec < 10`（且 >= 0） |
+#   | 夜间大额 | R-003 / R-028 | `order_is_night == 1 AND order_total_amount >= 3000` |
+#   | 零订单新号 | R-025 | `user_total_orders == 0 AND order_total_amount >= 1000` |
+
+PERSONA_GROUPS: list[dict] = [
+    {"code": "HF", "name": "高频下单", "n": 5, "covers": "R-019"},
+    {"code": "AS", "name": "高频售后", "n": 5, "covers": "R-020 / R-024"},
+    {"code": "CX", "name": "频繁取消", "n": 5, "covers": "R-021"},
+    {"code": "RF", "name": "高额退款", "n": 5, "covers": "R-023"},
+    {"code": "AD", "name": "多地址跨省", "n": 5, "covers": "R-012 / R-013"},
+    {"code": "WS", "name": "批发扫货", "n": 5, "covers": "R-016 / R-017 / R-018"},
+    {"code": "DC", "name": "大额折扣", "n": 5, "covers": "R-015"},
+    {"code": "FP", "name": "秒付订单", "n": 5, "covers": "R-014"},
+    {"code": "NG", "name": "夜间大额", "n": 5, "covers": "R-003 / R-028"},
+    {"code": "NU", "name": "零订单新号", "n": 5, "covers": "R-025（该画像刻意不给订单）"},
+]
+
+# 画像用户编号段：U-20XX（与 U-10xx 正常 / U-13xx 羊毛党 / U-14xx 地址团伙 /
+# U-15xx 投诉 / U-16xx 黄牛 都不冲突）
+PERSONA_BASE = 2000
+
+
+def _persona_uid(group_idx: int, i: int) -> str:
+    return f"U-{PERSONA_BASE + group_idx * 10 + i}"
+
+
+def _add_order(db, seq: int, uid: str, receive_id: str, details: list[tuple],
+               status: str, create_time, pay_gap_sec=None) -> str:
+    """写一条订单 + 若干明细。`details` = [(sku_id, sku_name, count, total, discount)]。"""
+    order_id = f"O-{seq:06d}"
+    payment_time = None
+    delivered_time = None
+    complete_time = None
+    if status != "待付款" and pay_gap_sec is not None:
+        payment_time = create_time + timedelta(seconds=pay_gap_sec)
+    if status in ("已发货", "已签收", "已完成", "退款中"):
+        delivered_time = (payment_time or create_time) + timedelta(days=random.uniform(1, 4))
+    if status == "已完成":
+        complete_time = (delivered_time or create_time) + timedelta(days=random.uniform(1, 6))
+
+    if db.get(OrderInfo, order_id) is None:
+        db.add(OrderInfo(order_id=order_id, create_time=create_time,
+                         payment_time=payment_time, delivered_time=delivered_time,
+                         complete_time=complete_time, user_id=uid,
+                         receive_id=receive_id, order_status=status))
+    detail_ids = []
+    for j, (sku_id, sku_name, cnt, total, discount) in enumerate(details, start=1):
+        did = f"OD-{seq:06d}-{j}"
+        if db.get(OrderDetail, did) is None:
+            db.add(OrderDetail(order_detail_id=did, order_id=order_id, sku_id=sku_id,
+                               sku_name=sku_name, sku_count=cnt,
+                               total_amount=round(total, 2),
+                               discount_amount=round(discount, 2),
+                               final_amount=round(total - discount, 2)))
+        detail_ids.append(did)
+    return order_id, detail_ids
+
+
+def gen_personas(db, skus: tuple[list, list], seq_start: int) -> dict:
+    """按规则集反推，造出各种风险画像的样本用户。
+
+    返回 `{"user_ids": [...], "order_ids": [...], "detail_ids": [...],
+            "personas": {code: [uid, ...]}, "next_seq": int}`。
+    """
+    cheap_skus, premium_skus = skus
+    all_skus = cheap_skus + premium_skus
+    categories = sorted({c for _, c, _ in all_skus})
+    seq = seq_start
+    user_ids: list[str] = []
+    order_ids: list[str] = []
+    detail_ids: list[str] = []
+    personas: dict[str, list[str]] = {}
+
+    def _addr(uid: str, tag: str, province=None, idx: int = 0) -> str:
+        rid = f"RCV-{tag}-{uid[2:]}-{idx}"
+        if db.get(ReceiveInfo, rid) is None:
+            if province:
+                prov = next(p for p in PROVINCES if p[0] == province)
+                city, district = random.choice(prov[1]), random.choice(prov[2])
+            else:
+                city, district = _random_region()[1:]
+                prov = None
+            db.add(ReceiveInfo(
+                receive_id=rid, user_id=uid, receiver_name=f"收货人{uid[2:]}",
+                receiver_phone=f"13{random.randint(100000000, 999999999)}",
+                receive_province=province or _random_region()[0],
+                receive_city=city, receive_district=district,
+                receive_street_address=f"{city}{district}{random.randint(1, 300)}号"))
+        return rid
+
+    def _user(uid: str) -> None:
+        if db.get(UserInfo, uid) is None:
+            db.add(UserInfo(user_id=uid, register_time=ts(random.uniform(5, 400)),
+                            user_level=random.choice(["普通", "普通", "VIP"])))
+        user_ids.append(uid)
+        if uid not in addr_of_local:
+            addr_of_local[uid] = [_addr(uid, "P", idx=1)]
+
+    addr_of_local: dict[str, list[str]] = {}
+
+    for gi, group in enumerate(PERSONA_GROUPS):
+        code = group["code"]
+        personas[code] = []
+        for i in range(1, group["n"] + 1):
+            uid = _persona_uid(gi, i)
+            _user(uid)
+            personas[code].append(uid)
+            main_addr = addr_of_local[uid][0]
+
+            if code == "HF":                      # 高频下单：近 7 天 22 单
+                for _ in range(22):
+                    sku = random.choice(cheap_skus)
+                    cnt = random.randint(1, 2)
+                    total = sku[2] * cnt
+                    seq += 1
+                    oid, dids = _add_order(
+                        db, seq, uid, main_addr,
+                        [(sku[0], f"商品-{sku[0]}", cnt, total, total * random.uniform(0, .1))],
+                        random.choice(["已支付", "已发货", "已完成"]),
+                        ts(random.uniform(0.2, 6.5)), random.uniform(120, 3600))
+                    order_ids.append(oid); detail_ids += dids
+
+            elif code == "AS":                    # 高频售后：9 单售后
+                for k in range(9):
+                    sku = random.choice(cheap_skus)
+                    total = sku[2] * random.randint(1, 2)
+                    seq += 1
+                    oid, dids = _add_order(
+                        db, seq, uid, main_addr,
+                        [(sku[0], f"商品-{sku[0]}", 1, total, 0)],
+                        "已完成", ts(random.uniform(10, 70)), random.uniform(120, 3600))
+                    order_ids.append(oid); detail_ids += dids
+                    db.add(Postsale(
+                        postsale_id=f"PS-P{seq:05d}", order_detail_id=dids[0],
+                        refund_amount=round(total * 0.9, 2),
+                        postsale_type=random.choice(["退款", "退货"]),
+                        postsale_status=random.choice(["已退款", "退款中"]),
+                        postsale_reason=random.choice(POSTSALE_REASONS),
+                        create_time=ts(random.uniform(1, 9))))
+
+            elif code == "CX":                    # 频繁取消：10 单取消
+                for k in range(10):
+                    sku = random.choice(cheap_skus)
+                    total = sku[2] * random.randint(1, 2)
+                    seq += 1
+                    oid, dids = _add_order(
+                        db, seq, uid, main_addr,
+                        [(sku[0], f"商品-{sku[0]}", 1, total, 0)],
+                        "已取消", ts(random.uniform(2, 80)), None)
+                    order_ids.append(oid); detail_ids += dids
+
+            elif code == "RF":                    # 高额退款：5 单退款共 ~2.6 万
+                for k in range(5):
+                    sku = random.choice(premium_skus)
+                    total = sku[2] * random.randint(1, 2)
+                    seq += 1
+                    oid, dids = _add_order(
+                        db, seq, uid, main_addr,
+                        [(sku[0], f"商品-{sku[0]}", 1, total, total * 0.05)],
+                        "退款中", ts(random.uniform(5, 60)), random.uniform(120, 3600))
+                    order_ids.append(oid); detail_ids += dids
+                    db.add(Postsale(
+                        postsale_id=f"PS-P{seq:05d}", order_detail_id=dids[0],
+                        refund_amount=round(total * 0.95, 2), postsale_type="退款",
+                        postsale_status=random.choice(["已退款", "退款中"]),
+                        postsale_reason="未收到货", create_time=ts(random.uniform(1, 40))))
+
+            elif code == "AD":                    # 多地址跨省：12 个地址 / 7 个省
+                provs = [p[0] for p in PROVINCES]
+                random.shuffle(provs)
+                addrs = [main_addr]
+                for k, prov in enumerate(provs[:7], start=2):
+                    addrs.append(_addr(uid, "PA", province=prov, idx=k))
+                for k in range(len(addrs) + 1, 13):
+                    addrs.append(_addr(uid, "PA", idx=k))
+                addr_of_local[uid] = addrs
+                for k in range(4):                # 各下一个单，让地址"用过"
+                    sku = random.choice(cheap_skus)
+                    total = sku[2]
+                    seq += 1
+                    oid, dids = _add_order(
+                        db, seq, uid, random.choice(addrs),
+                        [(sku[0], f"商品-{sku[0]}", 1, total, 0)],
+                        random.choice(["已签收", "已完成"]),
+                        ts(random.uniform(3, 70)), random.uniform(120, 3600))
+                    order_ids.append(oid); detail_ids += dids
+
+            elif code == "WS":                    # 批发扫货：1 单 24 行 / 9 类别 / 60 件
+                picks = []
+                used_cat = []
+                for k in range(24):
+                    cat = categories[k % len(categories)]
+                    cand = [s for s in all_skus if s[1] == cat]
+                    picks.append(random.choice(cand))
+                    used_cat.append(cat)
+                details = []
+                for sku in picks:
+                    cnt = random.randint(2, 4)
+                    total = sku[2] * cnt
+                    details.append((sku[0], f"商品-{sku[0]}", cnt, total, total * 0.05))
+                seq += 1
+                oid, dids = _add_order(db, seq, uid, main_addr, details, "已完成",
+                                       ts(random.uniform(2, 50)), random.uniform(120, 3600))
+                order_ids.append(oid); detail_ids += dids
+
+            elif code == "DC":                    # 大额折扣：实付不到原价 15%
+                for k in range(3):
+                    sku = random.choice(all_skus)
+                    cnt = random.randint(1, 2)
+                    total = sku[2] * cnt
+                    seq += 1
+                    oid, dids = _add_order(
+                        db, seq, uid, main_addr,
+                        [(sku[0], f"商品-{sku[0]}", cnt, total, total * random.uniform(.86, .93))],
+                        random.choice(["已支付", "已完成"]),
+                        ts(random.uniform(2, 60)), random.uniform(120, 3600))
+                    order_ids.append(oid); detail_ids += dids
+
+            elif code == "FP":                    # 秒付：支付间隔 3~8 秒
+                for k in range(4):
+                    sku = random.choice(cheap_skus)
+                    total = sku[2] * random.randint(1, 3)
+                    seq += 1
+                    oid, dids = _add_order(
+                        db, seq, uid, main_addr,
+                        [(sku[0], f"商品-{sku[0]}", 1, total, 0)],
+                        "已支付", ts(random.uniform(1, 40)), random.uniform(3, 8))
+                    order_ids.append(oid); detail_ids += dids
+
+            elif code == "NG":                    # 夜间大额：凌晨下单，金额 3200~7800
+                for k in range(4):
+                    sku = random.choice(premium_skus)
+                    cnt = random.randint(1, 2)
+                    total = sku[2] * cnt
+                    days = random.uniform(1, 80)
+                    ct = ts(days)
+                    ct = ct.replace(hour=random.randint(0, 5), minute=random.randint(0, 59))
+                    seq += 1
+                    oid, dids = _add_order(
+                        db, seq, uid, main_addr,
+                        [(sku[0], f"商品-{sku[0]}", cnt, total, total * 0.08)],
+                        random.choice(["已支付", "已完成"]), ct, random.uniform(120, 3600))
+                    order_ids.append(oid); detail_ids += dids
+
+            elif code == "NU":
+                # 零订单新号：**刻意一条订单都不给**。
+                # R-025 = `user_total_orders == 0 AND order_total_amount >= 1000`：
+                # 账号从未下过单，却提交了一个登记在**他人名下**的大额订单号 ——
+                # 盗号 / 撞库下单的典型特征（订单号归属与提交人不一致）。
+                # ⚠ 这批人不能被 gen_orders 的「每人至少 1 单」兜底扫到，
+                #   所以生成顺序必须排在 gen_orders 之后。
+                pass
+
+    return {"user_ids": user_ids, "order_ids": order_ids, "detail_ids": detail_ids,
+            "personas": personas, "next_seq": seq, "addr_of": addr_of_local}
+
+
 def clean(db) -> None:
     """清空 17 张业务表（按外键依赖倒序）。"""
     for model in (PostsaleLogistics, Postsale, LogisticsComplaintsRecord,
@@ -534,19 +910,32 @@ def main() -> None:
         cheap_skus, premium_skus = gen_skus(db)
         skus = (cheap_skus, premium_skus)
         result = gen_orders(db, user_ids, addr_of, skus)
-        gen_logistics(db, result["order_ids"])
+        # ⚠ 顺序要求：画像用户必须排在 `gen_orders` **之后**。
+        #   因为 gen_orders 末尾有「每人至少 1 单」的兜底补单（扫的是它自己的 user_ids），
+        #   而「零订单新号」画像**刻意不能有订单** —— 排在前面会被兜底补上，
+        #   R-025 又变成永不命中。
+        persona = gen_personas(db, skus, seq_start=900)
+        gen_logistics(db, result["order_ids"] + persona["order_ids"])
         gen_postsale(db, result["detail_ids"], result["ring_users"], result["high_refund"])
+        ring_ps = gen_ring_postsales(db, result["ring_users"], cheap_skus)
 
     print("\n" + "=" * 62)
     print("  业务数据生成完成")
     print("=" * 62)
-    print(f"  用户            {len(user_ids):>6}  （含 {REFUND_RING_SIZE} 个地址团伙账号）")
-    print(f"  收货地址        {sum(len(v) for v in addr_of.values()) + 1:>6}")
+    total_users = len(user_ids) + len(persona["user_ids"])
+    print(f"  用户            {total_users:>6}  （正常 {len(user_ids)} + 风险画像 {len(persona['user_ids'])}）")
+    print(f"  收货地址        {sum(len(v) for v in addr_of.values()) + sum(len(v) for v in persona['addr_of'].values()):>6}")
     print(f"  SKU             {len(cheap_skus) + len(premium_skus):>6}  （大众 {len(cheap_skus)} / 高价值 {len(premium_skus)}）")
-    print(f"  订单            {len(result['order_ids']):>6}  （含兜底补单 {result.get('topped_up', 0)}，保证每人至少 1 单）")
-    print(f"  订单明细        {len(result['detail_ids']):>6}")
-    print(f"  售后单          {150:>6}")
+    print(f"  订单            {len(result['order_ids']) + len(persona['order_ids']):>6}"
+          f"  （基线含兜底补单 {result.get('topped_up', 0)}；画像另加 {len(persona['order_ids'])}）")
+    print(f"  订单明细        {len(result['detail_ids']) + len(persona['detail_ids']):>6}")
+    print(f"  售后单          {150 + ring_ps + len(persona['personas'].get('AS', [])) * 9 + len(persona['personas'].get('RF', [])) * 5:>6}  （含团伙退款单 {ring_ps}）")
     print(f"  高退款用户      {len(result['high_refund']):>6}")
+    print("-" * 62)
+    print("  风险画像样本（让每条规则的画像在库里真的有样本）：")
+    for g in PERSONA_GROUPS:
+        uids = persona["personas"].get(g["code"], [])
+        print(f"    {g['name']:<10}{len(uids):>3} 人  → {g['covers']}")
     print("-" * 62)
     print("  参考数据：")
     for k, v in ref.items():

@@ -29,8 +29,8 @@ CREATE TABLE receive_info (
 	receive_street_address VARCHAR(120) NOT NULL, 
 	PRIMARY KEY (receive_id)
 );
-CREATE INDEX idx_receive_user ON receive_info (user_id);
 CREATE INDEX idx_receive_phone ON receive_info (receiver_phone);
+CREATE INDEX idx_receive_user ON receive_info (user_id);
 
 CREATE TABLE product_category (
 	product_category VARCHAR(20) NOT NULL, 

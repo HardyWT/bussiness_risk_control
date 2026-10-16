@@ -99,6 +99,35 @@ async function logout() {
   router.replace('/login')
 }
 
+/* ---------------------------------------------------------------- 账号解锁（T-82）
+ *
+ * 管理员专属：R-AU-04 已实现「锁定 10 分钟后自动解锁」，但演示/排障时需要**立即**解锁。
+ * 账号状态属于系统管理范围，所以只给 admin。
+ */
+const isAdmin = computed(() => store.role === 'admin')
+const users = ref([])
+const usersBusy = ref(false)
+const userToast = ref('')
+
+async function loadUsers() {
+  usersBusy.value = true
+  try {
+    const [list, , ] = await Promise.all([authApi.users(), Promise.resolve()])
+    users.value = list || []
+    userToast.value = ''
+  } catch (err) {
+    userToast.value = `加载用户失败：${err.message}`
+  } finally {
+    usersBusy.value = false
+  }
+}
+
+async function unlock(u) {
+  const data = await authApi.unlock(u.user_id)
+  userToast.value = `账号 ${data.username} 已解锁（状态 ${data.status}，失败次数归零）`
+  await loadUsers()
+}
+
 onMounted(load)
 </script>
 
@@ -108,6 +137,58 @@ onMounted(load)
 
     <div class="grid g-1-2">
       <div class="stack-16">
+        <!-- 管理员专属：账号解锁（T-82）
+             为什么放在个人中心：这是**自己账号**相关页面的自然延伸（改密码就在旁边），
+             而账号生命周期归管理员。审核员/策略师看不到这一块。 -->
+        <div v-if="isAdmin" class="card" style="margin-bottom:0">
+          <div class="card-hd">
+            <span>账号管理（管理员）</span>
+            <button class="btn btn-sm" @click="loadUsers" :disabled="usersBusy">
+              {{ usersBusy ? '加载中…' : '刷新' }}
+            </button>
+          </div>
+          <div class="card-bd">
+            <div class="muted" style="margin-bottom:10px">
+              锁定机制：连续登录失败 5 次会锁定账号，<b>10 分钟后自动解锁</b>
+              （R-AU-04）；这里可以**立即**解锁，用于演示或排障。
+            </div>
+            <table class="tb">
+              <thead>
+                <tr>
+                  <th style="width:120px">账号</th>
+                  <th style="width:120px">姓名</th>
+                  <th style="width:130px">角色</th>
+                  <th style="width:110px">状态</th>
+                  <th style="width:90px">失败次数</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="u in users" :key="u.user_id">
+                  <td class="mono">{{ u.username }}</td>
+                  <td>{{ u.display_name }}</td>
+                  <td>{{ u.role }}</td>
+                  <td>
+                    <span class="tag" :class="u.status === 'locked' ? 'tag-red' : 'tag-green'">
+                      {{ u.status === 'locked' ? '已锁定' : '正常' }}
+                    </span>
+                  </td>
+                  <td class="mono">{{ u.fail_count ?? '-' }}</td>
+                  <td>
+                    <span v-if="u.status === 'locked'" class="link" @click="unlock(u)">
+                      立即解锁
+                    </span>
+                    <span v-else class="muted">—</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div v-if="userToast" class="alert alert-info" style="margin-top:12px">
+              <div>{{ userToast }}</div>
+            </div>
+          </div>
+        </div>
+
         <!-- 账号信息（只读） -->
         <div class="card" style="margin-bottom:0">
           <div class="card-hd"><span>账号信息</span><span class="muted">只读</span></div>

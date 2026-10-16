@@ -133,7 +133,7 @@ function goPage(p) {
 function exportCsv() {
   const header = ['时间', '业务类型', '关联编号', '操作人', '动作', '变更前', '变更后']
   const lines = rows.value.map((r) => [
-    fmt(r.created_at), r.biz_type, r.biz_id, r.operator, r.action,
+    fmt(r.create_time), r.biz_type, r.biz_id, r.operator, r.action,
     JSON.stringify(r.before_value ?? ''), JSON.stringify(r.after_value ?? ''),
   ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
   const csv = `﻿${header.join(',')}\n${lines.join('\n')}`
@@ -221,7 +221,7 @@ onMounted(load)
           <tbody>
             <template v-for="r in rows" :key="r.log_id">
               <tr :class="{ sel: expanded === r.log_id }">
-                <td class="mono" style="font-size:12px">{{ fmt(r.created_at) }}</td>
+                <td class="mono" style="font-size:12px">{{ fmt(r.create_time) }}</td>
                 <td><span class="tag" :class="BIZ_CLS[r.biz_type] || 'tag-gray'">{{ r.biz_type }}</span></td>
                 <td>{{ r.operator }}</td>
                 <td class="mono" style="font-size:12px">{{ r.action }}</td>
@@ -237,7 +237,7 @@ onMounted(load)
               <tr v-if="expanded === r.log_id">
                 <td colspan="7" style="background:#fbfcfe;padding:16px 18px">
                   <div class="mono" style="font-size:12px;color:var(--text3);margin-bottom:9px">
-                    log_id = {{ r.log_id }} · biz_id = {{ r.biz_id }} · created_at = {{ fmt(r.created_at) }}
+                    log_id = {{ r.log_id }} · biz_id = {{ r.biz_id }} · create_time = {{ fmt(r.create_time) }}
                   </div>
                   <DiffViewer :before="r.before_value" :after="r.after_value" />
                 </td>

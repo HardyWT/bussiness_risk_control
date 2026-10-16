@@ -92,6 +92,23 @@ export const authApi = {
   logout: () => http.post('/auth/logout'),
   changePassword: (payload) => http.post('/auth/change-password', payload),
   users: () => http.get('/auth/users'),
+  /** 管理员专属：账号锁定状态 / 手动解锁 */
+  lockState: (userId) => http.get(`/auth/users/${userId}/lock-state`),
+  unlock: (userId) => http.post(`/auth/users/${userId}/unlock`),
+}
+
+/* ---------------------------------------- 模块 6 分析报告导出（分析师专属） */
+/**
+ * 拉取后端生成的 CSV 报告（带 UTF-8 BOM，Excel 打开不乱码）。
+ *
+ * ⚠ 必须走 blob：走默认 JSON 拦截器会把二进制当 JSON 解析而失败。
+ *   这里直接用 axios 实例、不经响应拦截器的 `code` 拆包逻辑。
+ */
+export function fetchAnalysisCsv(days = 30, eventType = '') {
+  return http.get('/analysis/export', {
+    params: { days, ...(eventType ? { event_type: eventType } : {}) },
+    responseType: 'blob',
+  })
 }
 
 /* ------------------------------------- 模块 2/3 规则、场景阈值、特征字典 */
@@ -105,6 +122,8 @@ export const ruleApi = {
   scenes: () => http.get('/rules/scenes'),
   updateScene: (sceneCode, payload) => http.put(`/rules/scenes/${sceneCode}`, payload),
   featureDict: (params) => http.get('/features/dict', { params }),
+  /** 策略师专属：规则仿真对比（含该规则 vs 排除该规则） */
+  compare: (ruleId, payload) => http.post(`/rules/${ruleId}/compare`, payload),
 }
 
 /* ---------------------------------------------- 模块 3 名单库（/blacklist） */
@@ -124,6 +143,21 @@ export const caseApi = {
   dispose: (caseId, payload) => http.post(`/cases/${caseId}/dispose`, payload),
   hold: (caseId, payload) => http.post(`/cases/${caseId}/hold`, payload),
   close: (caseId, payload) => http.post(`/cases/${caseId}/close`, payload),
+  /** 审核员专属：批量处置（逐件返回结果，单件失败不影响其他件） */
+  batchDispose: (payload) => http.post('/cases/batch-dispose', payload),
+}
+
+/* ------------------------------------------------- 模块 1 事件详情（/risk） */
+/**
+ * 单条事件的完整快照：事件字段 + `event_data` + 33 个特征 + 命中规则 + 评估结果。
+ *
+ * ⚠ 该接口后端早就实现（SPEC API-1.2），但前端一直**没有封装、也没有任何页面调用** ——
+ *   属于「后端有、前端没人用」的死接口，事件报文里的 `event_data` 因此永远没机会露面。
+ *   大盘滚屏与案件详情现在都通过它来展示事件快照。
+ *   （列表接口 `GET /risk/events` 暂无页面需要，仍不封装。）
+ */
+export const eventApi = {
+  detail: (eventId) => http.get(`/risk/event/${eventId}`),
 }
 
 /* -------------------------------------------- 模块 6 大盘监控（含健康度） */
@@ -148,6 +182,8 @@ export const auditApi = {
 export const systemApi = {
   health: () => http.get('/system/health'),
   stats: () => http.get('/system/stats'),
+  /** 运维专属：最近的运行日志（内存环形缓冲，最多 500 条） */
+  logs: (params) => http.get('/system/logs', { params }),
 }
 
 /* ---------------------------------------------------------- 模块 7 仿真 */

@@ -276,15 +276,24 @@ def main() -> None:
     print("\n[3] 规则引擎与五档仲裁")
     status, resp = call("GET", "/api/v1/rules", token=tokens["strategist"], base=base)
     rules = resp.get("data", [])
-    check("FR-31 规则列表返回 30 条",
-          status == 200 and len(rules) >= 30, f"{status} {len(rules)}")
+    from scripts.init_db import RULES as _RULES
+
+    check(f"FR-31 规则列表返回全部规则（{len(_RULES)} 条）",
+          status == 200 and len(rules) >= len(_RULES), f"{status} {len(rules)}")
     if rules:
         keys = {"rule_id", "rule_name", "rule_condition", "risk_level", "risk_score",
                 "action", "challengeable", "priority"}
         check("规则字段齐全（含 challengeable / priority）",
               keys.issubset(set(rules[0].keys())), str(sorted(rules[0].keys())))
         no_ch = [r for r in rules if r["challengeable"] == 0]
-        check("SPEC §3.6 恰好 6 条 challengeable=0", len(no_ch) == 6, f"实际 {len(no_ch)}")
+        # ⚠ 期望值从**规则集本身**推导，不要在自检里写死条数（v3.1 踩过）：
+        #   新增一条「不可挑战」规则（如 R-031 恶意物流投诉索赔）就会让
+        #   写死的 `== 6` 变成假失败 —— 而那是预期的规则变更，不是缺陷。
+        from scripts.init_db import RULES
+
+        expect_no_ch = len([r for r in RULES if r[8] == 0])
+        check(f"SPEC §3.6 不可挑战规则条数与规则集一致（{expect_no_ch} 条）",
+              len(no_ch) == expect_no_ch, f"实际 {len(no_ch)}，期望 {expect_no_ch}")
 
     status, resp = call("POST", "/api/v1/rules", token=tokens["strategist"], base=base,
                         body={"rule_name": "自检临时规则", "rule_category": "账户风险",
@@ -619,6 +628,85 @@ def main() -> None:
     check("T-73 阈值修改一次即同步 7 个场景（无 7 倍写放大）",
           status == 200 and resp.get("data", {}).get("synced_scenes") == 7,
           str(resp)[:140])
+
+    # ---------- 13. 各角色专属能力（T-78 ~ T-82） ----------
+    #
+    # 五种角色此前只在**数据可见范围**上有区别，缺少「只有我能做」的动作。
+    # 这一组逐条验证：能力存在、可用，且**别人用不了**。
+    print("\n[13] 各角色专属能力")
+
+    # T-78 审核员：批量处置
+    status, resp = call("GET", "/api/v1/cases?case_status=pending&page_size=3",
+                        token=tokens["reviewer"], base=base)
+    batch_ids = [i["case_id"] for i in (resp.get("data", {}).get("items") or [])]
+    if batch_ids:
+        status, resp = call("POST", "/api/v1/cases/batch-dispose",
+                            {"case_ids": batch_ids, "conclusion": "pass",
+                             "remark": "自检批量处置"}, token=tokens["strategist"], base=base)
+        check("T-78 批量处置对 strategist → 403", status == 403, f"{status}")
+        status, resp = call("POST", "/api/v1/cases/batch-dispose",
+                            {"case_ids": batch_ids, "conclusion": "pass",
+                             "remark": "自检批量处置"}, token=tokens["reviewer"], base=base)
+        ok_batch = (status == 200 and resp.get("data", {}).get("succeeded") == len(batch_ids))
+        check("T-78 reviewer 批量处置成功（逐件返回结果）", ok_batch,
+              f"{status} {str(resp.get('data'))[:140]}")
+    else:
+        check("T-78 reviewer 批量处置成功（逐件返回结果）", False, "无待审核案件可验证")
+
+    # T-79 策略师：规则仿真对比
+    event = {"event_type": "order_create", "source_id": "O-000020",
+             "user_id": "U-1001", "device_id": "DEV-N0001"}
+    status, _ = call("POST", "/api/v1/rules/R-002/compare", {"event": event},
+                     token=tokens["reviewer"], base=base)
+    check("T-79 规则仿真对比对 reviewer → 403", status == 403, f"{status}")
+    status, resp = call("POST", "/api/v1/rules/R-002/compare", {"event": event},
+                        token=tokens["strategist"], base=base)
+    d = resp.get("data", {})
+    check("T-79 strategist 可对比（返回基线 / 对照 / delta）",
+          status == 200 and all(k in d for k in ("baseline", "control", "delta")),
+          str(d)[:150])
+    check("T-79 对照组命中里不含被对比规则",
+          all(h.get("rule_id") != "R-002" for h in
+              (d.get("control", {}).get("triggered_rules") or [])) if d else False,
+          str(d.get("control", {}).get("triggered_rules"))[:120])
+
+    # T-80 分析师：导出分析报告
+    status, _ = call("GET", "/api/v1/analysis/export?days=7", token=tokens["reviewer"], base=base)
+    check("T-80 分析报告导出对 reviewer → 403", status == 403, f"{status}")
+    req = urllib.request.Request(f"{base}/api/v1/analysis/export?days=7")
+    req.add_header("Authorization", f"Bearer {tokens['analyst']}")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read()
+        check("T-80 analyst 可导出 CSV 且带 UTF-8 BOM",
+              raw[:3] == bytes([0xEF, 0xBB, 0xBF])
+              and "每日趋势".encode("utf-8") in raw,
+              f"前 3 字节 {raw[:3]!r}")
+    except Exception as exc:  # noqa: BLE001
+        check("T-80 analyst 可导出 CSV 且带 UTF-8 BOM", False, str(exc)[:120])
+
+    # T-81 运维：运行日志
+    status, _ = call("GET", "/api/v1/system/logs?lines=10", token=tokens["analyst"], base=base)
+    check("T-81 运行日志对 analyst → 403", status == 403, f"{status}")
+    status, resp = call("GET", "/api/v1/system/logs?lines=10", token=tokens["ops"], base=base)
+    d = resp.get("data", {})
+    check("T-81 ops 可读运行日志（含请求访问日志）",
+          status == 200 and isinstance(d.get("lines"), list) and d.get("buffer_size", 0) > 0,
+          f"buffer_size={d.get('buffer_size')}")
+
+    # T-82 管理员：账号解锁
+    status, _ = call("POST", "/api/v1/auth/users/U-0005/unlock",
+                     token=tokens["strategist"], base=base)
+    check("T-82 账号解锁对 strategist → 403", status == 403, f"{status}")
+    status, resp = call("GET", "/api/v1/auth/users/U-0005/lock-state",
+                        token=tokens["admin"], base=base)
+    check("T-82 admin 可查账号锁定状态与自动解锁时长",
+          status == 200 and (resp.get("data", {}).get("auto_unlock_seconds") or 0) > 0,
+          str(resp.get("data"))[:140])
+    status, resp = call("POST", "/api/v1/auth/users/U-0005/unlock",
+                        token=tokens["admin"], base=base)
+    check("T-82 admin 可立即解锁账号", status == 200 and resp.get("data", {}).get("status") == "active",
+          str(resp.get("data"))[:120])
 
     # ---------- 汇总 ----------
     print("\n" + "=" * 68)

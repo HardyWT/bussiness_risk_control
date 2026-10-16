@@ -95,21 +95,27 @@ def get_agent():
             from langchain_openai import ChatOpenAI
             from langgraph.prebuilt import create_react_agent
 
-            llm = ChatOpenAI(
+            llm_kwargs = dict(
                 model=settings.LLM_MODEL_NAME,
                 api_key=settings.LLM_API_KEY,
                 base_url=settings.LLM_BASE_URL,
                 temperature=settings.LLM_TEMPERATURE,   # 0.1：风控场景需确定性输出
                 timeout=settings.LLM_TIMEOUT_SECONDS,
             )
+            # 仅在需要「关闭」时才追加参数：这样换成不支持该字段的端点也不会报 400。
+            # 关闭后模型不再输出 reasoning_content，实测单轮耗时约降 60%。
+            if not settings.LLM_ENABLE_THINKING:
+                llm_kwargs["extra_body"] = {"enable_thinking": False}
+            llm = ChatOpenAI(**llm_kwargs)
             _agent_instance = create_react_agent(
                 model=llm,
                 tools=agent_tools.ALL_TOOLS,
                 prompt=SYSTEM_PROMPT,
             )
             _agent_error = None
-            log.info("AI Agent 就绪：model=%s base_url=%s",
-                     settings.LLM_MODEL_NAME, settings.LLM_BASE_URL)
+            log.info("AI Agent 就绪：model=%s base_url=%s thinking=%s",
+                     settings.LLM_MODEL_NAME, settings.LLM_BASE_URL,
+                     "on" if settings.LLM_ENABLE_THINKING else "off")
             return _agent_instance
         except DegradedError:
             raise

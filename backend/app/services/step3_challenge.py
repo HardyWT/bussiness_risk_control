@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..models import (RiskAssessment, RiskCase, RiskChallengeRecord, RiskEvent,
                       RiskRuleScene)
-from ..utils import new_case_id, now_dt
+from ..utils import new_case_id, next_case_no, now_dt
 
 log = logging.getLogger(__name__)
 
@@ -157,6 +157,7 @@ def _escalate_to_review(db: Session, row: RiskChallengeRecord, status: str,
     event = db.query(RiskEvent).filter(RiskEvent.event_id == event_id).first()
     case = RiskCase(
         case_id=new_case_id(),
+        case_no=next_case_no(db),
         assessment_id=assessment.assessment_id,
         event_id=event_id,
         user_id=assessment.user_id,

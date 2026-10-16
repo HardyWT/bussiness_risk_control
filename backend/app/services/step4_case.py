@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from ..config import CASE_STATUSES
 from ..models import (RiskAssessment, RiskBlacklist, RiskCase,
                       RiskDisposalRecord, RiskEvent, RiskFeature, RiskUserProfile)
-from ..utils import (from_json, mask_phone, new_id, now_dt, parse_iso, round4, to_float)
+from ..utils import (case_no_label, from_json, mask_phone, new_id, now_dt,
+                     parse_iso, round4, to_float)
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +67,8 @@ def _norm_filter(value: str | None, alias: dict) -> str | None:
 def get_case_list(db: Session, case_status: str | None = None,
                   case_category: str | None = None, risk_level: str | None = None,
                   event_type: str | None = None, start_time: str | None = None,
-                  end_time: str | None = None, page: int = 1, page_size: int = 20) -> dict:
+                  end_time: str | None = None, keyword: str | None = None,
+                  page: int = 1, page_size: int = 20) -> dict:
     """案件列表 + 复合筛选 + 分页（FR-23）。筛选值支持中英文枚举。"""
     query = db.query(RiskCase)
     status_norm = _norm_filter(case_status, STATUS_ALIAS)
@@ -75,6 +77,16 @@ def get_case_list(db: Session, case_status: str | None = None,
         query = query.filter(RiskCase.case_status == status_norm)
     if case_category:
         query = query.filter(RiskCase.case_category == str(case_category).strip())
+    if keyword:
+        # 关键字既能是 ULID（`cas01m...`）也能是短号（`C-1024` / `1024`）
+        kw = str(keyword).strip()
+        conds = [RiskCase.case_id.like(f"%{kw}%"), RiskCase.user_id.like(f"%{kw}%")]
+        digits = "".join(ch for ch in kw if ch.isdigit())
+        if digits and kw[:1].upper() == "C":
+            conds.append(RiskCase.case_no == int(digits))
+        elif digits.isdigit() and len(digits) <= 6:
+            conds.append(RiskCase.case_no == int(digits))
+        query = query.filter(or_(*conds))
     if level_norm:
         query = query.filter(RiskCase.risk_level == level_norm)
     if start_time:
@@ -123,6 +135,8 @@ def _case_brief(case: RiskCase) -> dict:
     """案件列表项（含关联评估的分值与命中规则摘要）。"""
     return {
         "case_id": case.case_id,
+        "case_no": case.case_no,
+        "case_no_label": case_no_label(case.case_no, case.case_id),
         "event_id": case.event_id,
         "user_id": case.user_id,
         "case_status": case.case_status,
@@ -211,6 +225,8 @@ def get_case_detail(db: Session, case_id: str) -> tuple[dict | None, str | None]
 
     return {
         "case_id": case.case_id,
+        "case_no": case.case_no,
+        "case_no_label": case_no_label(case.case_no, case.case_id),
         "assessment_id": case.assessment_id,
         "event_id": case.event_id,
         "user_id": case.user_id,

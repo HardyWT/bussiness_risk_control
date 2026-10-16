@@ -10,6 +10,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { caseApi } from '@/api'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import RiskTag from '@/components/RiskTag.vue'
 import StateBlock from '@/components/StateBlock.vue'
 import { useUserStore } from '@/stores/user'
@@ -29,6 +30,7 @@ const filters = reactive({
   case_category: '',
   case_status: 'pending',
   start_time: '',
+  keyword: '',
   page: 1,
   page_size: 20,
 })
@@ -143,13 +145,14 @@ async function load() {
 
 function search() {
   filters.page = 1 // R-FE2-05：筛选条件变化后重置到第 1 页
+  clearSelection()
   load()
 }
 
 function reset() {
   Object.assign(filters, {
     risk_level: '', case_category: '', case_status: 'pending',
-    start_time: '', page: 1,
+    start_time: '', keyword: '', page: 1,
   })
   load()
 }
@@ -157,11 +160,82 @@ function reset() {
 function goPage(p) {
   if (p < 1 || p > pageCount.value) return
   filters.page = p
+  clearSelection()   // 勾选不跨页：避免「以为自己选了 20 件，其实只处置了 10 件」
   load()
 }
 
 function openCase(row) {
   router.push(`/workbench/case/${row.case_id}`)
+}
+
+/* ------------------------------------------------ 审核员专属：批量处置（T-78）
+ *
+ * 为什么放在工作台：审核岗一天要处理几十上百件工单，逐个点开详情再处置不现实。
+ * 真实风控后台都有「批量放行 / 批量拉黑」，这是审核岗与策略岗/分析岗最直观的区别。
+ *
+ * ⚠ 权限：后端 `POST /cases/batch-dispose` 是 `require_role("reviewer")`，
+ *   admin 也不可用（PRD §2.1.1：管理员对案件只读）。前端据此渲染控件。
+ */
+const canDispose = computed(() => store.role === 'reviewer')
+const selected = ref([])                 // 已勾选的案件号
+const batchConclusion = ref('blacklist') // 默认与案件详情页一致
+const batchRemark = ref('')
+const confirmVisible = ref(false)
+const batchBusy = ref(false)
+const batchResult = ref(null)            // 批量结果（逐件）
+
+const allChecked = computed(() => rows.value.length > 0
+  && selected.value.length === rows.value.length)
+
+function toggleOne(caseId) {
+  const i = selected.value.indexOf(caseId)
+  if (i >= 0) selected.value.splice(i, 1)
+  else selected.value.push(caseId)
+}
+
+function toggleAll() {
+  selected.value = allChecked.value ? [] : rows.value.map((r) => r.case_id)
+}
+
+/** 二次确认弹窗里的动作清单（按所选结论动态生成） */
+const batchActions = computed(() => {
+  const n = selected.value.length
+  const out = [`对 ${n} 件案件执行「${{ pass: '放行（记为误报）', reject: '拦截订单', blacklist: '违规拦截并拉黑' }[batchConclusion.value]}」`]
+  if (batchConclusion.value === 'reject') {
+    out.push('拦截关联订单（仅「待付款 / 已支付」的订单会被置为「已取消」，已发货订单不回改）')
+  }
+  if (batchConclusion.value === 'blacklist') {
+    out.push('将涉事用户与设备加入黑名单（已在名单中的按幂等处理，不重复写入）')
+  }
+  out.push('处置后的案件自动归档为「已归档」终态')
+  out.push('本次操作写入不可篡改审计日志（记录操作人、时间与变更前后快照）')
+  return out
+})
+
+/** 切换页/筛选后清空勾选，避免把上一页的选择带到下一页 */
+function clearSelection() {
+  selected.value = []
+  batchResult.value = null
+}
+
+async function doBatchDispose() {
+  if (!selected.value.length) return
+  batchBusy.value = true
+  try {
+    batchResult.value = await caseApi.batchDispose({
+      case_ids: selected.value,
+      conclusion: batchConclusion.value,
+      remark: batchRemark.value || '批量处置',
+    })
+    confirmVisible.value = false
+    selected.value = []
+    batchRemark.value = ''
+    await load()
+  } catch (err) {
+    batchResult.value = { error: err.message }
+  } finally {
+    batchBusy.value = false
+  }
 }
 
 onMounted(load)
@@ -217,6 +291,10 @@ onMounted(load)
             <label>触发时间（起）</label>
             <input v-model="filters.start_time" type="datetime-local">
           </div>
+          <div class="field">
+            <label>关键字</label>
+            <input v-model="filters.keyword" placeholder="C-1024 / 用户号">
+          </div>
           <div class="row" style="gap:8px;margin-top:2px">
             <button class="btn btn-primary" style="flex:1;justify-content:center" @click="search">查询</button>
             <button class="btn" style="flex:1;justify-content:center" @click="reset">重置</button>
@@ -229,6 +307,19 @@ onMounted(load)
         <div class="card-hd">
           <span>案件列表</span>
           <span class="row" style="gap:8px">
+            <template v-if="canDispose && selected.length">
+              <span class="tag tag-red">已选 {{ selected.length }} 件</span>
+              <select v-model="batchConclusion" style="width:150px">
+                <option value="pass">放行（记为误报）</option>
+                <option value="reject">拦截订单</option>
+                <option value="blacklist">违规拦截并拉黑</option>
+              </select>
+              <button class="btn btn-primary btn-sm"
+                      @click="confirmVisible = true">批量处置</button>
+              <input v-model="batchRemark" placeholder="处置原因（可选）"
+                     style="width:220px">
+              <button class="btn btn-sm" @click="clearSelection">取消选择</button>
+            </template>
             <span class="tag tag-orange">待审核 {{ statCards[1].val }}</span>
             <span class="tag tag-gray">共 {{ total }} 案件</span>
           </span>
@@ -241,6 +332,9 @@ onMounted(load)
           <table class="tb">
             <thead>
               <tr>
+                <th v-if="canDispose" style="width:38px">
+                  <input type="checkbox" :checked="allChecked" @change="toggleAll">
+                </th>
                 <th style="width:110px">案件号</th>
                 <th style="width:92px">风险等级</th>
                 <th style="width:150px">案件分类</th>
@@ -252,8 +346,14 @@ onMounted(load)
             </thead>
             <tbody>
               <tr v-for="row in rows" :key="row.case_id">
+                <td v-if="canDispose">
+                  <input type="checkbox" :checked="selected.includes(row.case_id)"
+                         @change="toggleOne(row.case_id)">
+                </td>
                 <td>
-                  <div class="cell-main">{{ row.case_id }}</div>
+                  <!-- 对外展示用短号（C-1024）：ULID 又长又难读，演示时记不住也报不出来。
+                       完整 ULID 放在副行（字号更小），排查时仍能复制。 -->
+                  <div class="cell-main">{{ row.case_no_label || row.case_id }}</div>
                   <div class="cell-sub">{{ row.user_id }}</div>
                 </td>
                 <td>
@@ -293,5 +393,34 @@ onMounted(load)
         </div>
       </div>
     </div>
+
+    <!-- 批量处置结果：逐件展示，失败项给出原因（后端逐件返回，不透传成一句"失败"） -->
+    <div v-if="batchResult" class="alert"
+         :class="batchResult.error ? 'alert-danger' : 'alert-info'" style="margin-top:16px">
+      <div v-if="batchResult.error">批量处置失败：{{ batchResult.error }}</div>
+      <div v-else>
+        批量处置完成：成功 <b>{{ batchResult.succeeded }}</b> 件 /
+        失败 <b>{{ batchResult.failed }}</b> 件（共 {{ batchResult.total }} 件）
+        <ul v-if="batchResult.failed" style="margin:8px 0 0 18px">
+          <li v-for="it in batchResult.items.filter((x) => x.result === 'failed')" :key="it.case_id">
+            {{ it.case_id }} —— {{ it.message || it.error }}
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- R-FE2-02：破坏性操作必须二次确认，且**列出将执行的具体动作清单**
+         （不是只问一句"确定吗"）。复用通用 ConfirmDialog，
+         动作清单由 `batchActions` 按所选结论动态生成。 -->
+    <ConfirmDialog
+      :visible="confirmVisible"
+      title="批量处置确认"
+      :actions="batchActions"
+      :warning="`将对 ${selected.length} 件案件执行处置，处置后自动归档，且不可撤销。`"
+      confirm-text="确认批量处置"
+      :loading="batchBusy"
+      @confirm="doBatchDispose"
+      @cancel="confirmVisible = false"
+    />
   </div>
 </template>

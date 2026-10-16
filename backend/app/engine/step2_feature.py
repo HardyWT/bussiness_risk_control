@@ -67,7 +67,7 @@ FEATURE_DICT: list[dict] = [
     {"key": "order_discount_amount", "name": "折扣总额", "dimension": "订单", "window": "单笔", "dtype": "float",
      "desc": "SUM(discount_amount)", "source": "order_detail"},
     {"key": "order_discount_rate", "name": "折扣率", "dimension": "订单", "window": "单笔", "dtype": "float",
-     "desc": "discount / (total + discount)，保留 4 位小数", "source": "order_detail"},
+     "desc": "折扣 ÷ 原价 = discount_amount / total_amount，保留 4 位小数", "source": "order_detail"},
     {"key": "order_pay_interval_sec", "name": "下单到支付间隔(秒)", "dimension": "订单", "window": "单笔", "dtype": "int",
      "desc": "payment_time - create_time；**未支付返回 -1**（哨兵值）", "source": "order_info"},
     {"key": "order_is_night", "name": "是否夜间下单", "dimension": "订单", "window": "单笔", "dtype": "float",
@@ -299,8 +299,20 @@ def compute_order_features(db: Session, order_id: str) -> dict[str, float]:
         f["order_sku_count"] = to_float(row.sku_count)
         f["order_discount_amount"] = to_float(row.discount_amount)
         f["order_category_count"] = to_float(row.category_count)
-        original = to_float(row.total_amount) + to_float(row.discount_amount)
-        f["order_discount_rate"] = round4(safe_div(to_float(row.discount_amount), original))
+        # 折扣率 = 折扣 ÷ 原价（PRD 附录 B · F-O05）。
+        #
+        # ⚠ SPEC §2.3.2 早期写的是 `discount / (total + discount)` —— 那会**重复计算**：
+        #   `order_detail.total_amount` 本身就是**原价**（`final = total - discount`），
+        #   再加一遍 discount 等于把原价算成「原价 + 折扣」。
+        #   后果有两层：
+        #     ① 口径与 PRD 不符；
+        #     ② 该公式下 rate 的**上界是 0.5**（discount→∞ 时 discount/(total+discount)→1
+        #        但 final 会变成负数，业务上不成立），而规则 R-015 要求 `> 0.8` ——
+        #        这条规则在任何合理的业务数据上都**永远不可能命中**。
+        #   改成「折扣 ÷ 原价」后：`discount = 0.9 × total` → rate = 0.9 → R-015 可命中，
+        #   语义也正是「实付不到原价的两成 = 异常大额优惠」。
+        f["order_discount_rate"] = round4(safe_div(to_float(row.discount_amount),
+                                                  to_float(row.total_amount)))
 
     info = db.execute(text(
         "SELECT create_time, payment_time FROM order_info WHERE order_id = :oid"

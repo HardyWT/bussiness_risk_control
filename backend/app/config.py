@@ -40,7 +40,10 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     LLM_MODEL_NAME: str = "qwen-plus"
     LLM_TEMPERATURE: float = 0.1
-    LLM_TIMEOUT_SECONDS: int = 30
+    LLM_TIMEOUT_SECONDS: int = 90
+    # 思考模式：True 保留上游默认（模型自行推理，答案更稳但更慢）；
+    # False 显式传 enable_thinking=False 关闭，实测耗时约降 60%、token 减半。
+    LLM_ENABLE_THINKING: bool = True
     AGENT_MAX_CONTEXT_MESSAGES: int = 20
 
     # ---------------------------------------------------------------- 决策阈值

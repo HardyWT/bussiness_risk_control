@@ -743,3 +743,30 @@ textarea { resize: vertical; line-height: 1.6; }
   .g4 { grid-template-columns: repeat(2, 1fr); }
   .g-case { grid-template-columns: 300px 1fr; }
 }
+
+/* ---------------------------------------------------------------- 运行日志（T-81）
+   等宽字体 + 深色底，让告警行一眼可辨；最大高度内滚动，避免把页面撑长。 */
+.log-box {
+  max-height: 320px;
+  overflow: auto;
+  background: #1f2937;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.85;
+}
+.log-line { display: flex; gap: 8px; align-items: baseline; color: #d1d5db; }
+.log-line .mono { font-family: var(--mono); }
+.log-line .muted { color: #6b7280 !important; flex: 0 0 132px; }
+.log-lv {
+  flex: 0 0 62px;
+  text-align: center;
+  border-radius: 3px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #fff;
+}
+.log-lv.lv-info { background: #1f6feb; }
+.log-lv.lv-warning { background: #b45309; }
+.log-lv.lv-error { background: #b91c1c; }
+.log-lv.lv-debug { background: #4b5563; }

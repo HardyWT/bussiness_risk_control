@@ -162,6 +162,8 @@ def run_risk_check(db: Session, request, *, event_id: str | None = None,
     """
     t0 = time.perf_counter()
 
+    from ..utils import next_case_no
+
     event_dict = {
         "event_id": event_id or new_event_id(),
         "event_type": request.event_type,
@@ -263,6 +265,7 @@ def run_risk_check(db: Session, request, *, event_id: str | None = None,
     if result.decision in ("Review", "Reject"):
         case_row = RiskCase(
             case_id=new_case_id(),
+            case_no=next_case_no(db),
             assessment_id=assessment_row.assessment_id,
             event_id=event_dict["event_id"],
             user_id=request.user_id,

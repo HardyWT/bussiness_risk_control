@@ -23,7 +23,7 @@ from .database import create_all, ping, session_scope
 from .deps import ApiError
 from .engine.step3_rule import clear_rule_cache
 from .routers import (admin, agent, audit, auth, case, dashboard, profile,
-                      risk, rule, simulate)
+                      risk, roles, rule, simulate)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +98,14 @@ async def lifespan(app: FastAPI):
         log.warning("启动兜底扫描失败（不影响启动）：%s", exc)
 
     sweep_task = asyncio.create_task(_challenge_sweep_loop())
+
+    # 把最近 500 条日志留一份在内存里，供运维页 `/system/logs` 查看（T-81）。
+    # ⚠ 必须挂在 uvicorn 自己的 logger 上 —— 它们 `propagate=False`，
+    #   只挂 root 会一条都收不到（见 `install_log_buffer` 的说明）。
+    from .routers.roles import install_log_buffer
+    install_log_buffer()
+    log.info("服务启动完成 · LLM %s",
+             "已配置" if settings.llm_configured else "未配置（AI 助手降级）")
 
     if not settings.llm_configured:
         log.warning("LLM_API_KEY 未配置 —— AI 助手将走降级路径（R-AG-01），"
@@ -205,6 +213,7 @@ app.include_router(audit.router)         # 模块 6  审计日志
 app.include_router(simulate.router)      # 模块 7  仿真测试
 app.include_router(agent.router)         # 模块 9  AI 智能助手
 app.include_router(admin.router)         # 运维辅助
+app.include_router(roles.router)         # 各角色专属能力（批量处置 / 规则对比 / 分析导出 / 运行日志 / 解锁）
 
 
 @app.get("/", include_in_schema=False)

@@ -202,7 +202,10 @@ const removing = ref(false)
 async function confirmRemove() {
   removing.value = true
   try {
-    const id = removeTarget.value.list_id
+    // ⚠ 后端 `_blacklist_to_dict` 返回的键是 `blacklist_id`，不是 `list_id`。
+    //   早期读 `list_id` 恒为 undefined → 实际发出 `DELETE /blacklist/undefined`，
+    //   后端 422/404，而 catch 只显示「移除失败」——「移除名单项」等于完全失效。
+    const id = removeTarget.value.blacklist_id
     await blacklistApi.remove(id)
     toast.value = '名单项已移除'
     removeTarget.value = null
@@ -273,7 +276,7 @@ onMounted(load)
             </tr>
           </thead>
           <tbody>
-            <tr v-for="w in filtered" :key="w.list_id" :style="isExpired(w) ? { opacity: .62, background: '#fcfcfc' } : {}">
+            <tr v-for="w in filtered" :key="w.blacklist_id" :style="isExpired(w) ? { opacity: .62, background: '#fcfcfc' } : {}">
               <td><RiskTag kind="listType" :value="w.list_type" /></td>
               <td><span class="tag tag-gray">{{ DIM_LABEL[w.entity_type] || w.entity_type }}</span></td>
               <td class="mono" style="font-size:12.5px">{{ w.entity_value }}</td>

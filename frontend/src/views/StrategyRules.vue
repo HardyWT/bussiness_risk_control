@@ -22,9 +22,16 @@ const store = useUserStore()
  * 后端规则写操作是 `require_role("strategist")`：**admin 对规则只读**。
  * v3.0 这里写成 ['strategist','admin']，导致管理员在页面上看到可点的
  * 「新建规则 / 编辑 / 启停 / 内联改分」，一点就吃到后端 403 ——
- * 「按钮能点但必然失败」是最伤信任的一类破窗（README §8.2 #7 修了后端没修前端）。
+ * 「按钮能点但必然失败」是最伤信任的一类破窗（HANDOFF §九 · 8.2 #7 修了后端没修前端）。
  */
 const canEdit = computed(() => store.role === 'strategist')
+
+/**
+ * 策略师专属：**规则仿真对比**（T-79）。
+ * 与 `canEdit` 同门槛（后端 `POST /rules/{id}/compare` 也是 strategist），
+ * 所以这两个判定在页面上始终一致 —— 不会出现「能编辑却不能对比」的错位。
+ */
+const canCompare = computed(() => store.role === 'strategist')
 
 /* ---------------------------------------------------------------- 枚举常量 */
 const CATEGORIES = ['订单欺诈', '支付风险', '账户风险', '售后滥用', '地址风险', '物流风险']
@@ -351,6 +358,59 @@ async function confirmDelete() {
 
 const rid = (r) => r.rule_id ?? r.rule_code
 
+/* ---------------------------------------------------------------- 仿真对比（T-79）
+ *
+ * 为什么要有：策略师上线一条规则前真正想知道的是**它的边际影响** ——
+ * 「这条规则会让多少原本放行的事件变成人审？」只做一次仿真回答不了这个问题。
+ * 对比是把**同一条事件**分别放进「含该规则」与「排除该规则」两种规则集里跑，
+ * 直接给出差异。
+ */
+const compareRule = ref(null)
+const compareEvent = reactive({
+  event_type: 'order_create',
+  source_id: '',
+  user_id: '',
+  device_id: '',
+})
+const compareResult = ref(null)
+const comparing = ref(false)
+const compareError = ref('')
+
+const COMPARE_EVENT_TYPES = [
+  { value: 'order_create', label: 'order_create 下单' },
+  { value: 'order_pay', label: 'order_pay 支付' },
+  { value: 'after_sale_apply', label: 'after_sale_apply 售后申请' },
+  { value: 'coupon_receive', label: 'coupon_receive 领券' },
+  { value: 'login', label: 'login 登录' },
+  { value: 'logistics_complaint', label: 'logistics_complaint 物流投诉' },
+]
+
+function openCompare(rule) {
+  compareRule.value = rule
+  compareResult.value = null
+  compareError.value = ''
+  // 预填一个能真正触发规则的样本：默认用「仿真页模板里出现过」的用户与设备，
+  // 让策略师第一次点开就能看到有意义的对比结果，而不是"未命中"。
+  compareEvent.source_id = compareEvent.source_id || 'O-000020'
+  compareEvent.user_id = compareEvent.user_id || 'U-1001'
+  compareEvent.device_id = compareEvent.device_id || 'DEV-N0001'
+}
+
+async function runCompare() {
+  comparing.value = true
+  compareError.value = ''
+  compareResult.value = null
+  try {
+    compareResult.value = await ruleApi.compare(rid(compareRule.value), {
+      event: { ...compareEvent },
+    })
+  } catch (err) {
+    compareError.value = err.message
+  } finally {
+    comparing.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -468,6 +528,9 @@ onMounted(load)
                 <span class="switch" :class="{ on: !!r.is_enabled }" @click="canEdit && toggle(r)" />
               </td>
               <td>
+                <template v-if="canCompare">
+                  <span class="link" style="margin-right:8px" @click="openCompare(r)">仿真对比</span>
+                </template>
                 <template v-if="canEdit">
                   <span class="link" @click="openEdit(r)">编辑</span>
                   <span class="link" style="color:var(--danger-text);margin-left:8px" @click="deleteTarget = r">删除</span>
@@ -635,6 +698,104 @@ onMounted(load)
       @cancel="deleteTarget = null"
       @confirm="confirmDelete"
     />
+    <!-- 规则仿真对比弹窗（策略师专属，T-79） -->
+    <div v-if="compareRule" class="modal-mask" @click.self="compareRule = null">
+      <div class="modal-box" style="max-width:820px">
+        <div class="modal-hd">
+          <span>
+            仿真对比 · {{ rid(compareRule) }} {{ compareRule.rule_name }}
+            <span class="muted" style="font-weight:400;font-size:12px">（含该规则 vs 排除该规则）</span>
+          </span>
+          <span class="muted" style="font-size:16px;cursor:pointer" @click="compareRule = null">×</span>
+        </div>
+
+        <div class="modal-bd">
+          <div class="grid" style="grid-template-columns:repeat(4,1fr);gap:10px">
+            <div class="field">
+              <label>事件类型</label>
+              <select v-model="compareEvent.event_type">
+                <option v-for="t in COMPARE_EVENT_TYPES" :key="t.value" :value="t.value">{{ t.label }}</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>业务单据号</label>
+              <input v-model="compareEvent.source_id" placeholder="订单号 / 券号 / 售后单号">
+            </div>
+            <div class="field">
+              <label>用户编号</label>
+              <input v-model="compareEvent.user_id" placeholder="U-1001">
+            </div>
+            <div class="field">
+              <label>设备指纹</label>
+              <input v-model="compareEvent.device_id" placeholder="DEV-N0001">
+            </div>
+          </div>
+
+          <div class="row" style="justify-content:flex-end;gap:8px;margin-top:12px">
+            <button class="btn btn-primary" :disabled="comparing" @click="runCompare">
+              {{ comparing ? '运行中…' : '运行对比' }}
+            </button>
+          </div>
+
+          <div v-if="compareError" class="alert alert-danger" style="margin-top:14px">
+            <div>{{ compareError }}</div>
+          </div>
+
+          <template v-if="compareResult">
+            <div class="alert alert-info" style="margin-top:14px">
+              <div>{{ compareResult.note }}</div>
+            </div>
+
+            <div class="grid" style="grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+              <div class="card" style="margin-bottom:0">
+                <div class="card-hd"><span>基线（当前全部规则）</span></div>
+                <div class="card-bd">
+                  <div class="row" style="gap:14px;margin-bottom:8px">
+                    <span>评分 <b class="mono">{{ compareResult.baseline.final_score }}</b></span>
+                    <span>等级 <b>{{ compareResult.baseline.risk_level }}</b></span>
+                    <RiskTag kind="decision" :value="compareResult.baseline.decision" />
+                  </div>
+                  <div class="muted" style="font-size:12px">
+                    命中 {{ compareResult.baseline.rule_count }} 条
+                  </div>
+                </div>
+              </div>
+              <div class="card" style="margin-bottom:0">
+                <div class="card-hd"><span>对照（排除 {{ rid(compareRule) }}）</span></div>
+                <div class="card-bd">
+                  <div class="row" style="gap:14px;margin-bottom:8px">
+                    <span>评分 <b class="mono">{{ compareResult.control.final_score }}</b></span>
+                    <span>等级 <b>{{ compareResult.control.risk_level }}</b></span>
+                    <RiskTag kind="decision" :value="compareResult.control.decision" />
+                  </div>
+                  <div class="muted" style="font-size:12px">
+                    命中 {{ compareResult.control.rule_count }} 条
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="alert" :class="compareResult.delta.upgraded ? 'alert-warn' : 'alert-info'"
+                 style="margin-top:12px">
+              <div>
+                本规则带来的影响：分数
+                <b>{{ compareResult.delta.score > 0 ? '+' : '' }}{{ compareResult.delta.score }}</b>
+                · 判定{{ compareResult.delta.decision_changed ? '**发生变化**' : '未变化' }}
+                <template v-if="compareResult.delta.score > 0">
+                  —— 也就是说，去掉这条规则后，该事件的风险分从
+                  {{ compareResult.baseline.final_score }} 降到
+                  {{ compareResult.control.final_score }}。
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <div class="modal-ft">
+          <button class="btn" @click="compareRule = null">关闭</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 

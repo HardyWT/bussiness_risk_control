@@ -12,6 +12,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { caseApi } from '@/api'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import EntityGraph from '@/components/EntityGraph.vue'
+import EventSnapshotPanel from '@/components/EventSnapshotPanel.vue'
 import FeatureTable from '@/components/FeatureTable.vue'
 import RiskTag from '@/components/RiskTag.vue'
 import StateBlock from '@/components/StateBlock.vue'
@@ -26,6 +27,16 @@ const error = ref('')
 const detail = ref(null)
 const submitting = ref(false)
 const toast = ref('')
+
+/**
+ * 是否展开「触发本案件的事件」完整报文。
+ *
+ * ⚠ 本页原先**完全没有事件信息**：只展示案件维度（画像 / 当前订单 / 决策摘要 /
+ *   命中规则 / 特征快照 / 图谱），连 `detail.event_id` 都没读过。
+ *   而事件报文里的 `event_data` 快照（渠道 / 支付方式 / 退款方式…）
+ *   在界面上从未露面过。这里是它唯一的入口。
+ */
+const showEvent = ref(false)
 
 const conclusion = ref('reject')
 const remark = ref('')
@@ -102,6 +113,8 @@ function decide(score, hasCritical) {
 /* ------------------------------------------------------------------ 数据 */
 
 const caseId = computed(() => detail.value?.case_id || route.params.id)
+/** 对外展示的短号（`C-1024`）；后端未返回时回退到 ULID */
+const caseLabel = computed(() => detail.value?.case_no_label || caseId.value)
 const status = computed(() => normStatus(detail.value?.case_status))
 const statusLabel = computed(() => STATUS_LABEL[status.value] || status.value)
 const profile = computed(() => detail.value?.profile || {})
@@ -337,7 +350,10 @@ onMounted(load)
       <!-- ============ 案件头 ============ -->
       <div class="row-between mb-16">
         <div class="row-gap-12">
-          <h2 style="font-size:17px;font-weight:600">案件 {{ caseId }}</h2>
+          <h2 style="font-size:17px;font-weight:600">
+            案件 {{ caseLabel }}
+            <span class="muted mono" style="font-size:11.5px;font-weight:400">{{ caseId }}</span>
+          </h2>
           <RiskTag kind="level" :value="level" />
           <RiskTag kind="status" :value="status" />
         </div>
@@ -440,6 +456,18 @@ onMounted(load)
             <div class="divider" style="margin:10px 0"></div>
             <div class="muted" style="margin-bottom:6px">评分计算过程</div>
             <div class="code" style="font-size:11.5px">{{ scoreCalc }}</div>
+
+            <!-- 触发本案件的事件报文（API-1.2）—— 原型 04-case-detail 只到「特征快照」，这里是加法 -->
+            <div class="divider" style="margin:12px 0"></div>
+            <div class="row" style="justify-content:space-between;align-items:center">
+              <span class="muted">触发本案件的事件</span>
+              <span class="link" @click="showEvent = !showEvent">
+                {{ showEvent ? '收起事件快照' : '查看事件快照' }}
+              </span>
+            </div>
+            <div v-if="showEvent" style="margin-top:10px">
+              <EventSnapshotPanel :event-id="detail.event_id" />
+            </div>
           </div>
         </div>
       </div>

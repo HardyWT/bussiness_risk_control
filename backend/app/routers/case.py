@@ -39,6 +39,7 @@ def list_cases(
     scene_code: str | None = None,             # v2 兼容
     start_time: str | None = None,
     end_time: str | None = None,
+    keyword: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
     _: RiskUser = Depends(CASE_READ_ROLES),
@@ -51,7 +52,7 @@ def list_cases(
         case_category=case_category,
         risk_level=risk_level,
         event_type=event_type or scene_code,
-        start_time=start_time, end_time=end_time,
+        start_time=start_time, end_time=end_time, keyword=keyword,
         page=page, page_size=page_size,
     )
     return ok(data)

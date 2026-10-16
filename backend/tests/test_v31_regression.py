@@ -674,5 +674,9 @@ def test_admin_reset_works_with_foreign_keys(client, auth_headers):
 
     counts = client.get("/api/v1/admin/health").json()["data"]["counts"]
     assert counts["risk_event"] == 0
-    assert counts["risk_rule"] == 30, "keep_config=true 时规则应保留"
+    # 规则条数以 `init_db.RULES` 为准，不写死数字 ——
+    # 加一条规则（如 v3.1 的 R-031）就会让写死的断言变成假失败。
+    from scripts.init_db import RULES
+
+    assert counts["risk_rule"] == len(RULES), "keep_config=true 时规则应保留"
     assert counts["risk_user"] == 5, "账号永不清空"

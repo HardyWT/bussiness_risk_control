@@ -12,6 +12,7 @@
 
 import json
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 
 import ulid
@@ -83,6 +84,42 @@ def new_case_id() -> str:
 def new_session_id() -> str:
     """AI 会话编号：sess + ULID。"""
     return new_id("sess")
+
+
+# ---------------------------------------------------------------- 案件短号
+_case_no_lock = threading.Lock()
+_case_no_cache: list[int] = [0]
+
+
+def next_case_no(db) -> int:
+    """分配案件对外短号（`C-1024` 里的那个 1024）。
+
+    ⚠ 实现要点：用**进程内缓存 + 数据库兜底**，而不是每建一件都 `SELECT MAX()`。
+      回放一次要建 300+ 件案件，每件一次 `MAX()` 就是 300+ 次额外查询。
+      缓存为空时（进程刚启动 / 首次调用）回库取一次最大值。
+      多进程部署会各自分配，短号可能重复 —— 演示环境单进程，且短号只用于展示，
+      真要有冲突也不影响任何业务逻辑（唯一性由 ULID 主键保证）。
+    """
+    with _case_no_lock:
+        if _case_no_cache[0] == 0:
+            from sqlalchemy import func
+
+            from .models import RiskCase
+
+            _case_no_cache[0] = int(db.query(func.max(RiskCase.case_no)).scalar() or 0)
+        _case_no_cache[0] += 1
+        return _case_no_cache[0]
+
+
+def reset_case_no_cache() -> None:
+    """清空短号缓存（数据重置、测试隔离用）。"""
+    with _case_no_lock:
+        _case_no_cache[0] = 0
+
+
+def case_no_label(case_no: int | None, fallback: str = "") -> str:
+    """短号 → 展示串；没有短号时回退（历史数据 / 兜底）。"""
+    return f"C-{case_no}" if case_no else fallback
 
 
 # ---------------------------------------------------------------- 脱敏

@@ -168,6 +168,23 @@ class CaseClose(BaseModel):
     remark: str | None = Field(default="确认为误报，关闭案件")
 
 
+class BatchDispose(BaseModel):
+    """批量处置请求（审核员专属，T-78）。"""
+    case_ids: list[str] = Field(..., min_length=1, max_length=200)
+    conclusion: Literal["pass", "reject", "blacklist"]
+    remark: str | None = None
+    actions: list[str] | None = None
+
+
+class CaseCompare(BaseModel):
+    """规则仿真对比请求（策略师专属，T-79）。
+
+    `event` 就是一次普通的风控检查请求 —— 对比的是「同一条事件在
+    含该规则 / 排除该规则两种规则集下的判定差异」。
+    """
+    event: "RiskCheckRequest"
+
+
 # ============================================================ 模块 7：仿真
 class SimulateRun(RiskCheckRequest):
     dry_run: bool = True
